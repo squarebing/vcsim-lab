@@ -27,12 +27,20 @@ class VCenterError(RuntimeError):
 def connect(cfg: VCenterConfig) -> "Vim.ServiceInstance":
     """Connect to vCenter/vcsim. vcsim uses a self-signed cert, so the
     default is an unverified SSL context; set VC_INSECURE=0 for a real
-    vCenter with a trusted certificate."""
+    vCenter with a trusted certificate.
+
+    The scheme comes from the config (VC_SCHEME): SmartConnect defaults
+    to https, so plain-http vcsim (the container on Render, -tls=false)
+    needs protocol="http" passed explicitly — otherwise the client
+    speaks TLS to a plaintext server and fails with
+    "[SSL: WRONG_VERSION_NUMBER] wrong version number".
+    """
     context = None
     if cfg.insecure:
         context = ssl._create_unverified_context()
     try:
         si = SmartConnect(
+            protocol=cfg.scheme,
             host=cfg.host,
             port=cfg.port,
             user=cfg.user,

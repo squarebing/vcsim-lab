@@ -109,4 +109,21 @@ container: vcsim runs with `-tls=false` (flag verified in v0.56.2:
 passes `VC_SCHEME=http` to the builder, and `VCenterConfig` gained a
 `scheme` field read from `VC_SCHEME` (default `https`, so local runs
 are unchanged). Public clients still reach the sim over HTTPS at the
-Render URL. Added `tests/test_config.py` (4 tests).
+Render URL. Added `tests/test_config.py` (4 tests). Note: this fix was
+incomplete — see entry 11. The scheme reached the URL property but
+not the connection itself, so the Render build still failed.
+
+## 11. 2026-11-13 14:39 — Render build fails: SSL WRONG_VERSION_NUMBER
+
+> render failed with "build failed: could not connect to vCenter at 127.0.0.1:10000 as 'squarebing': [SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1011). Is vcsim running? See README 'Start vcsim'."
+
+Outcome: the entry-10 fix only changed the `VCenterConfig.url`
+property, which nothing in the connection path uses:
+`vcenter.connect()` calls pyVmomi's `SmartConnect`, which defaults to
+`protocol='https'` and silently ignores the configured scheme — so the
+builder still spoke TLS to the now-plaintext vcsim. Fixed by passing
+`protocol=cfg.scheme` to `SmartConnect` (verified against the
+installed pyVmomi: `SmartConnect(protocol='https', ...)` — "What
+protocol to use for the connection (e.g. https or http)"). Added
+`tests/test_vcenter.py` (2 tests, mocking `SmartConnect` to assert the
+protocol passthrough).
