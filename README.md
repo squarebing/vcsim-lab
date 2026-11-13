@@ -332,7 +332,7 @@ Every push to `main` rebuilds the container image and redeploys it:
 ```
 push to main
   -> GitHub Actions (.github/workflows/docker-publish.yml)
-  -> docker build + push binghuspectrocloud/vcsim-lab:latest (and :<sha>)
+  -> docker build + push squarebing/vcsim-lab:latest (and :<sha>)
   -> POST the Render deploy hook
   -> Render pulls :latest and runs it
 ```
@@ -353,7 +353,7 @@ docker run -p 8989:8989 vcsim-lab   # SDK: https://localhost:8989/sdk
 
 1. **Docker Hub secrets** — in the GitHub repo, Settings -> Secrets and
    variables -> Actions, add:
-   - `DOCKERHUB_USERNAME` — `binghuspectrocloud`
+   - `DOCKERHUB_USERNAME` — `squarebing`
    - `DOCKERHUB_TOKEN` — a Docker Hub access token (Docker Hub ->
      Account Settings -> Personal Access Tokens). Without these the
      workflow fails loudly with setup instructions; it never silently

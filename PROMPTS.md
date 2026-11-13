@@ -83,7 +83,7 @@ Outcome: CI/CD pipeline. Added `Dockerfile` (python:3.12-slim + vcsim
 binary from the govmomi release) and `docker-entrypoint.sh` (start
 vcsim on 0.0.0.0:$PORT with the lab's flags, build the 12 VMs, keep
 vcsim in the foreground), `.dockerignore`, `.github/workflows/docker-publish.yml`
-(push to main -> build -> push binghuspectrocloud/vcsim-lab:latest and
+(push to main -> build -> push squarebing/vcsim-lab:latest and
 :<sha> to Docker Hub -> POST the Render deploy hook), and `render.yaml`
 (Blueprint: free web service, runtime image). Docker Hub secrets fail
 loudly when unset; the Render step skips with a notice until

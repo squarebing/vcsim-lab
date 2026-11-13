@@ -2,7 +2,7 @@
 # Docker image published by .github/workflows/docker-publish.yml.
 #
 # One-time setup (see README "CI/CD pipeline"):
-#   1. Push to main so Actions publishes binghuspectrocloud/vcsim-lab:latest.
+#   1. Push to main so Actions publishes squarebing/vcsim-lab:latest.
 #   2. Render Dashboard -> New -> Blueprint -> connect squarebing/vcsim-lab.
 #      Render prompts for VCSIM_USERNAME / VCSIM_PASSWORD (sync: false).
 #   3. Copy the service's Deploy Hook URL into the RENDER_DEPLOY_HOOK
@@ -19,7 +19,7 @@ services:
     # repo pushes (a push would otherwise race the image publish).
     autoDeploy: false
     image:
-      url: docker.io/binghuspectrocloud/vcsim-lab:latest
+      url: docker.io/squarebing/vcsim-lab:latest
     envVars:
       - key: VCSIM_USERNAME
         sync: false
