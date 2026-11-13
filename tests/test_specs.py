@@ -42,7 +42,7 @@ def _vm_spec(**overrides):
 class TestConfig(unittest.TestCase):
     def test_lab_loads(self):
         lab = config.load_lab(LAB)
-        self.assertEqual(len(lab.vms), 12)
+        self.assertEqual(len(lab.vms), 21)
         self.assertEqual(lab.datacenter, "DC0")
         self.assertEqual(lab.cluster, "DC0_C0")
 
@@ -56,6 +56,10 @@ class TestConfig(unittest.TestCase):
         self.assertTrue(any(v.gpu and v.gpu.mode == "passthrough" for v in lab.vms))
         self.assertTrue(any(v.gpu and v.gpu.mode == "vgpu" for v in lab.vms))
         self.assertTrue(any(v.gpu and v.gpu.mode == "dynamic" for v in lab.vms))
+        gpu_vendors = {v.gpu.vendor for v in lab.vms if v.gpu}
+        self.assertEqual(gpu_vendors, {"nvidia", "amd"})
+        self.assertEqual(len([v for v in lab.vms if v.template]), 3)
+        self.assertEqual(len([v for v in lab.vms if v.vapp is not None]), 2)
         controllers = {d.controller for v in lab.vms for d in v.disks}
         self.assertTrue({"nvme", "pvscsi", "lsi-sas", "lsi-logic"} <= controllers)
         nic_types = {n.type for v in lab.vms for n in v.nics}

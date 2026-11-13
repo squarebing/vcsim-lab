@@ -199,6 +199,9 @@ def build_create_spec(spec: VmSpec, plan: VmPlan, refs: ResolvedRefs) -> vim.vm.
     )
 
     extra = dict(spec.extra_config)
+    if spec.vapp is not None:
+        # vcsim accepts vAppConfig on CreateVM and serves it back intact.
+        config.vAppConfig = devices.build_vapp_config(spec.vapp)
     if spec.gpu and spec.gpu.mode in ("passthrough", "dynamic"):
         # DirectPath I/O needs full memory reservation and 64-bit MMIO
         # sized to the GPU framebuffer (Broadcom KB 334594).

@@ -17,9 +17,24 @@ from .vcenter import (
     find_resource_pool,
     find_vm_by_name,
     find_vm_folder,
+    retrieve_props,
     vm_power_state,
     wait_for_task,
 )
+
+
+def _pool_children(si, pool) -> tuple[list, list]:
+    """A pool's VMs and child pools, via leaf property retrieval.
+
+    Direct attribute access fails for vApps: vcsim serves
+    VirtualApp.resourcePool as a malformed element that pyVmomi cannot
+    deserialize (KeyError 'type' in SoapAdapter). The PropertyCollector
+    omits the unset property instead, so leaf retrieval is the robust
+    path for both plain pools and vApps.
+    """
+    vimtype = vim.VirtualApp if isinstance(pool, vim.VirtualApp) else vim.ResourcePool
+    props = retrieve_props(si, pool, vimtype, ["vm", "resourcePool"])
+    return props.get("vm") or [], props.get("resourcePool") or []
 
 
 def teardown_lab(
@@ -63,12 +78,28 @@ def teardown_lab(
                 pool = find_resource_pool(cluster, name)
                 if pool is None:
                     continue
-                if pool.vm or pool.resourcePool:
+                vms, children = _pool_children(si, pool)
+                if vms or children:
                     log.append(f"resource pool {name}: not empty, kept")
                     continue
                 task = pool.Destroy_Task()
                 wait_for_task(si, task, label=f"delete resource pool {name}")
                 log.append(f"resource pool {name}: deleted")
+            # vApps are ResourcePools, so they are removed here too.
+            # The VMs were deleted above, so a vApp should be empty by
+            # now; destroy it only then — destroying a vApp that still
+            # contains VMs leaves stale object references in vcsim.
+            for name in lab.vapps:
+                vapp = find_resource_pool(cluster, name)
+                if vapp is None:
+                    continue
+                vms, children = _pool_children(si, vapp)
+                if vms or children:
+                    log.append(f"vApp {name}: not empty, kept")
+                    continue
+                task = vapp.Destroy_Task()
+                wait_for_task(si, task, label=f"delete vApp {name}")
+                log.append(f"vApp {name}: deleted")
     finally:
         disconnect(si)
     return log

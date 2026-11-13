@@ -127,3 +127,39 @@ installed pyVmomi: `SmartConnect(protocol='https', ...)` — "What
 protocol to use for the connection (e.g. https or http)"). Added
 `tests/test_vcenter.py` (2 tests, mocking `SmartConnect` to assert the
 protocol passthrough).
+
+## 12. 2026-11-13 14:47 — NVIDIA + AMD GPU VMs, VM templates, appliance VMs
+
+> add VMs with Nvidia and AMD GPU, and add some VM templates, and also add two VMs as appliances
+
+Outcome: the lab grew from 12 to 21 VMs. Probing first showed vcsim
+accepts all three: passthrough naming an NVIDIA/AMD PCI device binds the
+hosts' only display device (VMware SVGA II) with the declared IDs kept
+in the build report; vGPU profile names are stored unvalidated; dynamic
+GPUs read back degraded (allowedDevice lost). `MarkAsTemplate()` works
+and `config.template` reads back true, but device reconfigs on a
+template fail with `NotSupported`, so marking runs last. `vAppConfig`
+(VmConfigSpec with ProductSpec/PropertySpec, operation "add") is
+accepted on CreateVM and ReconfigVM and reads back intact, and
+`ResourcePool.CreateVApp` (a ResourcePool method, not a Folder method)
+creates a working vApp container. One interpretation call: AMD MxGPU is
+SR-IOV VF passthrough, not a vGPU profile (the vGPU-profile mechanism
+is NVIDIA-only), so the AMD shared-GPU VM is modelled as dynamic
+DirectPath with MI210 PCI IDs and the loader rejects AMD + vgpu.
+Added: `ubuntu-nvidia-a100-pt` (NVIDIA A100 passthrough),
+`ubuntu-nvidia-h100-vgpu` (`nvidia_h100-80c`), `rhel9-amd-mi210-pt`
+(AMD MI210 passthrough), `win11-amd-mxgpu` (AMD MxGPU dynamic, +TPM,
+Secure Boot, 3D); templates `win2022-template`,
+`ubuntu-2404-template`, `rhel9-template` (`template: true`, marked last,
+skipped on re-run); appliances `opnsense-fw` (OPNsense 24.7, WAN+LAN)
+and `truenas-storage` (TrueNAS 24.10, OS + 200G data disk) with OVF
+properties in the `lab-appliances` vApp. `config.py` carries GPU
+vendor/model with PCI cross-checks and the vApp model; `verify.py`
+checks template flag and vApp product/properties as core checks;
+teardown removes the vApp under `--remove-pools`, using leaf property
+retrieval for the emptiness check because reading
+`VirtualApp.resourcePool` directly fails pyVmomi deserialization
+(`KeyError: 'type'` — same for a template's `resourcePool`). Full build
+21 VMs / 69 steps / 0 failed in ~6s; verify 0 failures, 5 Secure Boot
+warnings (the known vcsim limitation); save/load round-trip restores
+all 21 VMs; 72 tests (23 new in `tests/test_gpu_vapp.py`).

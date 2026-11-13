@@ -141,6 +141,8 @@ def summarize_vm(vm: vim.VirtualMachine, runtime: dict | None = None) -> dict:
         "path": config.files.vmPathName,
         "power": runtime.get("power"),
         "host": runtime.get("host"),
+        "template": devices.is_template(vm),
+        "vapp": devices.describe_vapp_config(vm),
         "guest_id": config.guestId,
         "guest_name": config.guestFullName,
         "annotation": config.annotation,
@@ -292,6 +294,7 @@ def list_inventory(si) -> dict:
         ],
         "dvportgroups": [n.name for n in list_objs(content, vim.DistributedVirtualPortgroup)],
         "resource_pools": [p.name for p in list_objs(content, vim.ResourcePool)],
+        "vapps": [v.name for v in list_objs(content, vim.VirtualApp)],
         "vms": [v.name for v in list_objs(content, vim.VirtualMachine)],
     }
 
@@ -308,7 +311,12 @@ def print_table(summaries: list[dict]) -> None:
             f"{d['capacity_gb']:g}G/{d['datastore']}{' thin' if d['thin'] else ''}" for d in s["disks"]
         )
         nics = ", ".join(f"{n['type'].replace('Virtual', '')}@{n['network']}" for n in s["nics"])
-        print(f"{s['name']} [{s['power']}] {s['guest_id']} {s['cpus']}vCPU {s['memory_mb']}MB {s['firmware']}")
+        tag = " [template]" if s.get("template") else ""
+        print(f"{s['name']}{tag} [{s['power']}] {s['guest_id']} {s['cpus']}vCPU {s['memory_mb']}MB {s['firmware']}")
+        if s.get("vapp") and s["vapp"].get("product"):
+            p = s["vapp"]["product"]
+            props = ", ".join(f"{x['id']}={x['value']}" for x in s["vapp"]["properties"])
+            print(f"  appliance: {p['name']} {p['version']} by {p['vendor']} ({props})")
         print(f"  hw {s['hardware_version']} tpm={s['tpm']} gpu={gpu} boot={' > '.join(s['boot_order']) or '(default)'}")
         print(f"  controllers: {', '.join(s['controllers'])}")
         print(f"  disks: {disks}")

@@ -1,11 +1,13 @@
 """Verify the live lab against vms.yaml.
 
 Core checks (existence, CPU, memory, guest, firmware, disks, NICs, boot
-order, power, video 3D) must match. TPM, GPU and Secure Boot are
-best-effort: vcsim accepts the vTPM and GPU devices but serves some of
-their detail back degraded, and it drops the efiSecureBootEnabled flag
-entirely even though the flag is sent (verified against govmomi v0.56.2),
-so a mismatch there is a warning, not a failure — the report says which.
+order, power, video 3D, template flag, vAppConfig) must match. TPM, GPU
+and Secure Boot are best-effort: vcsim accepts the vTPM and GPU devices
+but serves some of their detail back degraded, and it drops the
+efiSecureBootEnabled flag entirely even though the flag is sent (verified
+against govmomi v0.56.2), so a mismatch there is a warning, not a
+failure — the report says which. Templates and vAppConfig are core:
+vcsim serves config.template and the full vAppConfig back reliably.
 """
 
 from __future__ import annotations
@@ -35,6 +37,24 @@ def verify_vm(spec: VmSpec, live: dict | None) -> tuple[list[str], list[str]]:
     _check("hardware_version", spec.hardware_version, live["hardware_version"], failures, warnings)
     _check("power", "poweredOn" if spec.power_on else "poweredOff", live["power"], failures, warnings)
     _check("boot_order", spec.boot_order, live["boot_order"], failures, warnings)
+    _check("template", spec.template, live.get("template", False), failures, warnings)
+    if spec.vapp is not None:
+        live_vapp = live.get("vapp") or {}
+        product = live_vapp.get("product") or {}
+        _check(
+            "vapp product",
+            (spec.vapp.name, spec.vapp.vendor, spec.vapp.version),
+            (product.get("name"), product.get("vendor"), product.get("version")),
+            failures,
+            warnings,
+        )
+        _check(
+            "vapp properties",
+            {p.id: p.value for p in spec.vapp.properties},
+            {p["id"]: p["value"] for p in live_vapp.get("properties", [])},
+            failures,
+            warnings,
+        )
 
     expected_disks = sorted((d.size_gb, d.datastore, d.thin) for d in spec.disks)
     actual_disks = sorted(

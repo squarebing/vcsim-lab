@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from pyVmomi import vim
 
-from .config import GpuSpec, NicSpec, VmSpec, parse_hex_id, to_signed_short
+from .config import GpuSpec, NicSpec, VAppSpec, VmSpec, parse_hex_id, to_signed_short
 
 # Temporary key ranges for devices created in one spec. They only need to be
 # unique within the spec; vCenter assigns the real keys. Video has no temp
@@ -334,7 +334,12 @@ def build_gpu_dynamic(key: int, vendor_id: int, device_id: int) -> vim.vm.device
 def build_gpu_vgpu(key: int, profile: str) -> vim.vm.device.VirtualDeviceSpec:
     """NVIDIA vGPU (shared GPU) via a vGPU profile name, e.g.
     "nvidia_a100-40c". The profile must exist on the host for a real
-    power-on; vcsim stores the profile name without validating it."""
+    power-on; vcsim stores the profile name without validating it.
+
+    NVIDIA-only: AMD has no vGPU profiles — AMD MxGPU is SR-IOV virtual
+    functions presented as PCI passthrough devices, so an AMD shared-GPU
+    VM uses passthrough or dynamic mode instead (see config.py).
+    """
     backing = vim.vm.device.VirtualPCIPassthrough.VmiopBackingInfo()
     backing.vgpu = profile
     device = vim.vm.device.VirtualPCIPassthrough()
@@ -360,6 +365,7 @@ def gpu_device_spec(gpu: GpuSpec, hosts, key: int = KEY_GPU) -> tuple[vim.vm.dev
         )
     # passthrough: prefer a concrete host device, fall back to dynamic.
     candidates = find_gpu_pci_devices(hosts)
+    declared = f"{gpu.vendor or '?'} {gpu.model or gpu.label}".strip()
     for host, dev in candidates:
         if dev.vendorId == to_signed_short(vendor_id) and dev.deviceId == to_signed_short(device_id):
             system_uuid = host.hardware.systemInfo.uuid
@@ -371,12 +377,126 @@ def gpu_device_spec(gpu: GpuSpec, hosts, key: int = KEY_GPU) -> tuple[vim.vm.dev
         system_uuid = host.hardware.systemInfo.uuid
         return build_gpu_passthrough_device(key, dev, system_uuid), (
             f"passthrough {dev.deviceName or dev.id} on host {host.name} "
-            f"(no exact {gpu.vendor_id}:{gpu.device_id} match; used first GPU-class device)"
+            f"(declared {declared} {gpu.vendor_id}:{gpu.device_id} is not on any host; "
+            f"bound the first GPU-class device instead)"
         )
     return build_gpu_dynamic(key, vendor_id, device_id), (
         f"no GPU-class PCI device on any host; fell back to dynamic DirectPath "
         f"{gpu.vendor_id}:{gpu.device_id} ({gpu.label})"
     )
+
+
+# ---------------------------------------------------------------------------
+# Templates
+# ---------------------------------------------------------------------------
+
+
+def is_template(vm) -> bool:
+    """True when the VM is marked as a template (config.template).
+
+    Served reliably by vcsim (direct read and leaf retrieve both work).
+    """
+    try:
+        return bool(vm.config.template)
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# vAppConfig (virtual appliances)
+# ---------------------------------------------------------------------------
+
+
+def build_vapp_config(vapp: VAppSpec) -> vim.vApp.VmConfigSpec:
+    """Build the VmConfigSpec for a VM's vAppConfig (OVF properties).
+
+    The write type is VmConfigSpec, whose product/property entries are
+    ProductSpec/PropertySpec with operation="add" wrapping the
+    ProductInfo/PropertyInfo values; the read-back type is VmConfigInfo
+    (see describe_vapp_config). vcsim accepts this on CreateVM and on
+    ReconfigVM and serves it back intact.
+    """
+    product = vim.vApp.ProductInfo()
+    product.key = 0
+    product.name = vapp.name
+    product.vendor = vapp.vendor
+    product.version = vapp.version
+    product.fullVersion = vapp.full_version or vapp.version
+    product_spec = vim.vApp.ProductSpec()
+    product_spec.operation = "add"
+    product_spec.info = product
+
+    property_specs = []
+    for i, prop in enumerate(vapp.properties):
+        info = vim.vApp.PropertyInfo()
+        info.key = i
+        info.id = prop.id
+        info.label = prop.label
+        info.type = prop.type
+        info.value = prop.value
+        info.userConfigurable = prop.user_configurable
+        info.description = prop.description
+        spec = vim.vApp.PropertySpec()
+        spec.operation = "add"
+        spec.info = info
+        property_specs.append(spec)
+
+    spec = vim.vApp.VmConfigSpec()
+    spec.product = [product_spec]
+    spec.property = property_specs
+    return spec
+
+
+def describe_vapp_config(vm) -> dict | None:
+    """Read back a VM's vAppConfig as plain data, or None when unset.
+
+    Returns {"product": {"name", "vendor", "version", "full_version"},
+    "properties": [{"id", "label", "type", "value"}]}.
+    """
+    vapp = getattr(vm.config, "vAppConfig", None)
+    if vapp is None:
+        return None
+    products = vapp.product or []
+    product = products[0] if products else None
+    return {
+        "product": (
+            {
+                "name": product.name,
+                "vendor": product.vendor,
+                "version": product.version,
+                "full_version": product.fullVersion,
+            }
+            if product is not None
+            else None
+        ),
+        "properties": [
+            {
+                "id": p.id,
+                "label": p.label,
+                "type": p.type,
+                "value": p.value,
+            }
+            for p in (vapp.property or [])
+        ],
+    }
+
+
+def vapp_config_matches(vm, vapp: VAppSpec) -> bool:
+    """True when the VM's live vAppConfig matches the declared spec
+    (product name/vendor/version and every property id/value)."""
+    live = describe_vapp_config(vm)
+    if live is None or live["product"] is None:
+        return False
+    product = live["product"]
+    if (product["name"], product["vendor"], product["version"]) != (
+        vapp.name,
+        vapp.vendor,
+        vapp.version,
+    ):
+        return False
+    live_props = {p["id"]: p["value"] for p in live["properties"]}
+    expected_props = {p.id: p.value for p in vapp.properties}
+    return live_props == expected_props
 
 
 # ---------------------------------------------------------------------------

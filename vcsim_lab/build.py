@@ -108,6 +108,40 @@ def ensure_resource_pool(cluster: vim.ClusterComputeResource, name: str) -> vim.
     return cluster.resourcePool.CreateResourcePool(name, pool_spec)
 
 
+def ensure_vapp(cluster: vim.ClusterComputeResource, name: str) -> vim.VirtualApp:
+    """Create (or find) a vApp container under the cluster's root pool.
+
+    CreateVApp is a ResourcePool method (not a Folder method) and is
+    synchronous: it returns the new VirtualApp. A vApp is a ResourcePool
+    subtype, so VMs are created inside it by passing it as the pool.
+    """
+    existing = find_resource_pool(cluster, name)
+    if existing is not None:
+        return existing
+
+    def _alloc():
+        return vim.ResourceAllocationInfo(
+            reservation=0,
+            expandableReservation=True,
+            limit=-1,
+            shares=vim.SharesInfo(level=vim.SharesInfo.Level.normal),
+        )
+
+    res_spec = vim.ResourceConfigSpec(cpuAllocation=_alloc(), memoryAllocation=_alloc())
+    product = vim.vApp.ProductInfo()
+    product.key = 0
+    product.name = name
+    product.vendor = "vcsim-lab"
+    product.version = "1.0"
+    product.fullVersion = "1.0"
+    product_spec = vim.vApp.ProductSpec()
+    product_spec.operation = "add"
+    product_spec.info = product
+    vapp_spec = vim.vApp.VAppConfigSpec()
+    vapp_spec.product = [product_spec]
+    return cluster.resourcePool.CreateVApp(name, res_spec, vapp_spec)
+
+
 def resolve_refs(si, lab: LabConfig, dc, cluster) -> dict:
     """Resolve datastores, networks, folders and pools once, up front, so
     a typo fails fast before any VM is created."""
@@ -151,6 +185,7 @@ def resolve_refs(si, lab: LabConfig, dc, cluster) -> dict:
 
     folders = {name: ensure_folder(dc, name) for name in lab.folders}
     pools = {name: ensure_resource_pool(cluster, name) for name in lab.resource_pools}
+    vapps = {name: ensure_vapp(cluster, name) for name in lab.vapps}
     hosts = list(cluster.host)
     return {
         "datastores": datastores,
@@ -159,6 +194,7 @@ def resolve_refs(si, lab: LabConfig, dc, cluster) -> dict:
         "opaque": opaque,
         "folders": folders,
         "pools": pools,
+        "vapps": vapps,
         "hosts": hosts,
         "notes": notes,
     }
@@ -271,6 +307,45 @@ def power_on(si, vm: vim.VirtualMachine, spec: VmSpec, report: VmReport) -> None
     report.add("power-on", "ok", "poweredOn")
 
 
+def apply_vapp_config(si, vm: vim.VirtualMachine, spec: VmSpec, report: VmReport) -> None:
+    """Reconcile the VM's vAppConfig (OVF product info + properties).
+
+    The create spec already sets it, so a fresh build skips here; this
+    step repairs a VM whose vAppConfig was changed or dropped. vcsim
+    accepts vAppConfig on ReconfigVM and serves it back intact.
+    """
+    if devices.vapp_config_matches(vm, spec.vapp):
+        report.add("vapp-config", "skipped", "vAppConfig already matches the spec")
+        return
+    cfg = vim.vm.ConfigSpec(vAppConfig=devices.build_vapp_config(spec.vapp))
+    _reconfig(si, vm, cfg, f"set vAppConfig on {spec.name}")
+    live = devices.describe_vapp_config(vm)
+    product = (live or {}).get("product") or {}
+    report.add(
+        "vapp-config",
+        "ok",
+        f"{product.get('name')} {product.get('version')} by {product.get('vendor')}",
+    )
+
+
+def mark_as_template(si, vm: vim.VirtualMachine, spec: VmSpec, report: VmReport) -> None:
+    """Mark the VM as a template (config.template = true).
+
+    Runs LAST: device reconfigs on a template fail with NotSupported in
+    vcsim (and on real vCenter a template is not reconfigurable), so
+    every device-adding extra must run before this step. MarkAsTemplate
+    is synchronous and requires the VM to be powered off.
+    """
+    if devices.is_template(vm):
+        report.add("template", "skipped", "VM is already a template")
+        return
+    if vm_power_state(si, vm) == vim.VirtualMachinePowerState.poweredOn:
+        task = vm.PowerOffVM_Task()
+        wait_for_task(si, task, label=f"power off {spec.name} before marking as template")
+    vm.MarkAsTemplate()
+    report.add("template", "ok", "marked as template (config.template = true)")
+
+
 def build_one_vm(si, lab: LabConfig, spec: VmSpec, refs: dict, recreate: bool) -> VmReport:
     report = VmReport(name=spec.name, created=False)
     dc = find_datacenter(si, lab.datacenter)
@@ -289,7 +364,9 @@ def build_one_vm(si, lab: LabConfig, spec: VmSpec, refs: dict, recreate: bool) -
             existing = None
     if existing is None:
         folder = refs["folders"].get(spec.folder) or dc.vmFolder
-        pool = refs["pools"].get(spec.resource_pool)
+        # A vApp is a ResourcePool, so a VM with vapp_container is
+        # created with pool=<the vApp> instead of a plain pool.
+        pool = refs["vapps"].get(spec.vapp_container) or refs["pools"].get(spec.resource_pool)
         if pool is None:
             cluster = find_cluster(dc, lab.cluster)
             pool = cluster.resourcePool
@@ -324,6 +401,14 @@ def build_one_vm(si, lab: LabConfig, spec: VmSpec, refs: dict, recreate: bool) -
     # Video is customised only when the spec asks for 3D or a non-default
     # VRAM size (VmSpec default is 16384 KB); other VMs keep the default
     # card vCenter/vcsim adds at create time.
+    #
+    # A VM that already exists as a template skips all device extras:
+    # device reconfigs on a template fail with NotSupported, and a
+    # template cannot be powered on. It was fully configured before it
+    # was marked, so there is nothing to redo.
+    if devices.is_template(vm):
+        report.add("template", "skipped", "VM is already a template; extras skipped")
+        return report
     video_step = (
         ("video", lambda: apply_video(si, vm, spec, report))
         if spec.video_3d or spec.video_ram_kb != 16384
@@ -334,7 +419,14 @@ def build_one_vm(si, lab: LabConfig, spec: VmSpec, refs: dict, recreate: bool) -
         video_step,
         ("tpm", lambda: add_tpm(si, vm, spec, report)) if spec.tpm else (None, None),
         ("gpu", lambda: add_gpu(si, vm, spec, refs["hosts"], report)) if spec.gpu else (None, None),
+        ("vapp-config", lambda: apply_vapp_config(si, vm, spec, report))
+        if spec.vapp
+        else (None, None),
         ("power-on", lambda: power_on(si, vm, spec, report)) if spec.power_on else (None, None),
+        # Template marking runs LAST, after every device extra.
+        ("template", lambda: mark_as_template(si, vm, spec, report))
+        if spec.template
+        else (None, None),
     ):
         if step is None:
             continue

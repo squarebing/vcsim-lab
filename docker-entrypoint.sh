@@ -5,7 +5,7 @@
 #    docker-compose.yml / tools/start-vcsim-binary.sh, listening on
 #    0.0.0.0:${PORT:-8989} (Render injects $PORT).
 # 2. Once the SDK endpoint answers, scripts/build_lab.py creates the
-#    12 VMs from vms.yaml.
+#    21 VMs from vms.yaml.
 # 3. vcsim is brought to the foreground so the container stays alive.
 #
 # Credentials come from VCSIM_USERNAME / VCSIM_PASSWORD (defaults

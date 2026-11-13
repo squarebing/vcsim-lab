@@ -1,19 +1,21 @@
 # vcsim-lab
 
 Build a varied vCenter inventory in [vcsim](https://github.com/vmware/govmomi)
-(the govmomi vSphere simulator) with plain Python + pyVmomi — 12 VMs spanning
+(the govmomi vSphere simulator) with plain Python + pyVmomi — 21 VMs spanning
 Windows, Linux and BSD, BIOS and EFI, NVMe/PVSCSI/LSI storage, standard /
-distributed / NSX networks, TPM, Secure Boot, 3D video, and three GPU modes —
-then query it back the way you would query a real vCenter.
+distributed / NSX networks, TPM, Secure Boot, 3D video, NVIDIA and AMD GPUs
+(passthrough, dynamic and vGPU), three VM templates, and two virtual
+appliances in a vApp — then query it back the way you would query a real
+vCenter.
 
 Everything is declarative: edit `vms.yaml`, run one command, get the lab.
 The builder is idempotent (re-runs skip existing VMs) and reports, per VM,
 exactly which steps vcsim accepted.
 
 Validated end to end against govmomi **v0.56.2** on 2026-11-13:
-full build 12 VMs / 40 steps / 0 failed, verify 0 failures
-(4 Secure Boot warnings — a vcsim limitation, see below), and a
-save/load round-trip that restores all 12 VMs.
+full build 21 VMs / 69 steps / 0 failed, verify 0 failures
+(5 Secure Boot warnings — a vcsim limitation, see below), and a
+save/load round-trip that restores all 21 VMs.
 
 ## Quickstart
 
@@ -47,7 +49,7 @@ Stop vcsim: `tools/stop-vcsim-binary.sh` (binary) or `docker compose down`.
 ## Layout
 
 ```
-vms.yaml                 the lab: 12 VMs, folders, pools, networks (single source of truth)
+vms.yaml                 the lab: 21 VMs, folders, pools, vApps, networks (single source of truth)
 docker-compose.yml       vcsim container (vmware/vcsim:v0.56.2)
 requirements.txt         pyvmomi>=8.0, pyyaml>=6.0
 .env.example             VC_HOST/PORT/USER/PASSWORD, VC_INSECURE, VCSIM_VERSION
@@ -60,15 +62,15 @@ render.yaml              Render Blueprint: web service from the Docker Hub image
 .github/workflows/docker-publish.yml   push to main -> build -> Docker Hub -> Render
 
 vcsim_lab/
-  config.py              YAML -> dataclasses + validation (guest IDs, hex PCI IDs)
+  config.py              YAML -> dataclasses + validation (guest IDs, hex PCI IDs, GPU vendor/model, vApp)
   specs.py               pure device planner + CreateVM spec assembly (offline-testable)
-  devices.py             device builders: controllers, disks, NICs, CD-ROM, TPM, GPU, boot
+  devices.py             device builders: controllers, disks, NICs, CD-ROM, TPM, GPU, boot, vAppConfig
   vcenter.py             connect, leaf property retrieval, task waiting, lookups
-  build.py               idempotent builder + per-VM step report
-  query.py               reference read path: summarize one/all VMs
+  build.py               idempotent builder + per-VM step report (templates, vApps)
+  query.py               reference read path: summarize one/all VMs (templates, vApps)
   storage.py             storage model (YAML -> dataclasses) + live reconciliation
   verify.py              live lab vs vms.yaml (core checks fail, best-effort warn)
-  teardown.py            delete the lab VMs
+  teardown.py            delete the lab VMs (and folders / pools / vApps on request)
 
 scripts/
   build_lab.py           [--only NAME ...] [--recreate] [--report FILE] [--plan-only]
@@ -84,7 +86,10 @@ tools/
 
 tests/test_specs.py      20 offline tests (VM planner/builder)
 tests/test_storage.py    23 offline tests (storage model + reconcile)
-                         run all: pytest tests/ -q (no vCenter needed)
+tests/test_gpu_vapp.py   23 offline tests (GPU vendor/model, templates, vAppConfig)
+tests/test_config.py     4 offline tests (config loading)
+tests/test_vcenter.py    2 offline tests (network lookup)
+                         run all: pytest tests/ -q (72 tests, no vCenter needed)
 ```
 
 ## The lab
@@ -92,8 +97,10 @@ tests/test_storage.py    23 offline tests (storage model + reconcile)
 One datacenter (`DC0`), one cluster (`DC0_C0`, 3 hosts) + 1 standalone host,
 3 datastores (`LocalDS_0/1/2`), networks `VM Network` (standard),
 `DC0_DVPG0` / `DC0_DVPG1` (distributed portgroups), `DC0_NSX0` (NSX opaque).
-Folders `lab-windows`, `lab-linux`, `lab-gpu`; resource pools
-`lab-general`, `lab-gpu`.
+Folders `lab-windows`, `lab-linux`, `lab-gpu`, `lab-templates`,
+`lab-appliances`; resource pools `lab-general`, `lab-gpu`; vApp
+`lab-appliances` (a ResourcePool subtype, created with
+`ResourcePool.CreateVApp`).
 
 | VM | OS | vCPU / RAM | Firmware | Storage | Network | Special |
 |---|---|---|---|---|---|---|
@@ -109,9 +116,72 @@ Folders `lab-windows`, `lab-linux`, `lab-gpu`; resource pools
 | freebsd13-nas | FreeBSD 13 | 2 / 4 GB | BIOS, vmx-19 | LSI Logic 60G + 2× LSI SAS 200G | VM Network e1000e | |
 | centos8-legacy | CentOS 8 | 2 / 2 GB | BIOS, vmx-19 | LSI Logic 60G thick lazy | VM Network e1000 | boot disk > network |
 | ubuntu-k8s-node | Ubuntu | 4 / 8 GB | EFI, hot-add | NVMe 100G thin | DVPG0 + DVPG1 | boot disk > network |
+| ubuntu-nvidia-a100-pt | Ubuntu | 16 / 64 GB | EFI | NVMe 500G thin | DVPG0 vmxnet3 | GPU passthrough, NVIDIA A100 80GB |
+| ubuntu-nvidia-h100-vgpu | Ubuntu | 8 / 32 GB | EFI | NVMe 200G thin | DVPG0 vmxnet3 | vGPU `nvidia_h100-80c` |
+| rhel9-amd-mi210-pt | RHEL 9 | 16 / 64 GB | EFI | NVMe 500G thin | DVPG0 + NSX opaque | GPU passthrough, AMD MI210 |
+| win11-amd-mxgpu | Windows 11 | 8 / 32 GB | EFI + Secure Boot + TPM | NVMe 200G thin | DVPG0 vmxnet3 | AMD MxGPU (dynamic), 3D video |
+| win2022-template | Windows Server 2022 | 4 / 8 GB | EFI | NVMe 100G thin | DVPG0 vmxnet3 | template |
+| ubuntu-2404-template | Ubuntu | 2 / 4 GB | EFI | NVMe 60G thin | DVPG0 vmxnet3 | template |
+| rhel9-template | RHEL 9 | 2 / 4 GB | EFI | NVMe 60G thin | DVPG0 vmxnet3 | template |
+| opnsense-fw | FreeBSD 13 (OPNsense) | 2 / 4 GB | BIOS, vmx-19 | LSI SAS 40G thin | VM Network + DVPG0 | appliance, vApp |
+| truenas-storage | FreeBSD 13 (TrueNAS) | 4 / 8 GB | EFI | NVMe 40G + 200G thin | DVPG0 vmxnet3 | appliance, vApp |
 
 GPU VMs also get a full memory reservation and the Broadcom KB 334594
 extraConfig (`pciPassthru.use64bitMMIO=TRUE`, `pciPassthru.64bitMMIOSizeGB`).
+
+### GPU vendors
+
+GPUs carry `vendor` (`nvidia` | `amd`), `model` (e.g. `A100`, `MI210`)
+and PCI `vendor_id`/`device_id`, cross-checked on load against a known
+list (`config.KNOWN_GPU_MODELS`): a declared model must match its PCI
+device id, and a declared vendor must match its PCI vendor id. The lab
+covers both vendors in passthrough and shared-GPU form: NVIDIA A100
+passthrough, NVIDIA H100 vGPU (`nvidia_h100-80c`), AMD MI210
+passthrough, and an AMD MxGPU VM.
+
+`vgpu` is NVIDIA-only, and the loader rejects `vendor: amd` with
+`mode: vgpu`: AMD MxGPU is SR-IOV — the GPU's virtual functions are
+presented to the VM as PCI passthrough devices, not as a vGPU profile.
+The MxGPU VM (`win11-amd-mxgpu`) is therefore modelled as dynamic
+DirectPath with the MI210 PCI IDs. Note that vcsim has no NVIDIA or AMD
+hardware at all — its only display-class PCI device is the VMware SVGA
+II adapter — so passthrough binds the SVGA and the build report says so
+(see below).
+
+### Templates
+
+Three VMs (`win2022-template`, `ubuntu-2404-template`, `rhel9-template`)
+are marked as vSphere templates: `template: true` in `vms.yaml`, and the
+builder calls `MarkAsTemplate()` as the **last** step, after every device
+extra — device reconfigs on a template are rejected (vcsim answers
+`NotSupported`). Templates cannot be powered on, so `template: true`
+requires `power_on: false` (validated on load). The query tool marks
+them `[template]`; `verify.py` checks `config.template` as a core check.
+On a re-run the builder skips all extras for a VM that is already a
+template. Teardown destroys templates directly — no conversion back is
+needed.
+
+### Appliances
+
+Two VMs act as virtual appliances and live in the `lab-appliances`
+folder inside the `lab-appliances` vApp (declared in `lab.vapps`, named
+per VM with `vapp_container:`):
+
+- `opnsense-fw` — OPNsense 24.7 firewall (FreeBSD, BIOS), WAN + LAN
+  NICs, powered on, with OVF properties `hostname`, `wan_ip`,
+  `lan_ip`, `admin_password`.
+- `truenas-storage` — TrueNAS 24.10 storage appliance (FreeBSD, EFI),
+  OS + 200 GB data disk, powered on, with OVF properties `hostname`,
+  `mgmt_ip`, `admin_password`.
+
+The product info and properties are set as `vAppConfig` on the VM
+(`VmConfigSpec` on write, `VmConfigInfo` on read) — vcsim accepts it on
+`CreateVM` and on `ReconfigVM` and serves it back intact, so this is
+real configuration, not declared-only: the query tool shows the product
+and properties, and `verify.py` checks them as core checks. The vApp
+container itself is created with `ResourcePool.CreateVApp` (a
+`ResourcePool` method, not a `Folder` method) and is removed by
+`teardown_lab.py --remove-pools` once its VMs are gone.
 
 ## Host storage
 
@@ -162,12 +232,14 @@ controller without touching vCenter, so it is unit-tested offline.
 keys (controllers −100…, disks −200…, CD-ROM −300, NICs −400…); vCenter
 assigns the real keys.
 
-**Create carries core devices only** (controllers, disks, NICs, CD-ROM).
-Boot order, TPM, GPU and video are applied afterwards as separate
+**Create carries core devices only** (controllers, disks, NICs, CD-ROM)
+plus the appliance `vAppConfig` (accepted on `CreateVM` and served back
+intact). Boot order, TPM, GPU and video are applied afterwards as separate
 best-effort `ReconfigVM_Task` steps, each recorded in the build report, so
 one device the simulator refuses cannot fail the whole VM. This split is
 also forced by vcsim behaviour (see below): the video card *must* be a
 post-create edit, and Secure Boot is sent with the boot-order reconfig.
+Template marking (`MarkAsTemplate`) runs after all of them, last of all.
 
 **Idempotent.** Existing VMs are skipped unless `--recreate` is given;
 folders and resource pools are ensured; datastores and networks are
@@ -176,10 +248,12 @@ halfway through the build. `--plan-only` prints the device plan without
 connecting.
 
 **Verify semantics.** Core mismatches (CPU, memory, guest, firmware,
-disks, NICs, boot order, power, video 3D) are failures. TPM, GPU and
-Secure Boot mismatches are warnings: vcsim accepts the devices but serves
-some of their detail back degraded, and drops the Secure Boot flag
-entirely (see below).
+disks, NICs, boot order, power, video 3D, template flag, vApp product +
+properties) are failures. TPM, GPU and Secure Boot mismatches are
+warnings: vcsim accepts the devices but serves some of their detail back
+degraded, and drops the Secure Boot flag entirely (see below). Template
+and vApp checks are core because vcsim serves `config.template` and the
+full `vAppConfig` back reliably.
 
 ## Save / load the model
 
@@ -290,7 +364,40 @@ devices, of which exactly one is display-class: the VMware SVGA II
 Adapter (`0000:00:0f.0`, `0x15ad:0x0405`). There is no NVIDIA device, so
 passthrough mode falls back to the first GPU-class device and the build
 report says so. On real hardware with a T4/A100 it binds the requested
-card.
+card. vcsim does not enforce PCI exclusivity: several VMs can bind the
+same SVGA device at once (a real vCenter would refuse the second one).
+
+**Templates work, but are not reconfigurable.** `MarkAsTemplate()` sets
+`config.template` (readable directly and via leaf retrieve), templates
+list normally, annotation reconfigs still work, and `Destroy_Task` works
+directly on a template. But adding a device to a template fails with
+`vmodl.fault.NotSupported` (verified for TPM and GPU), and powering one
+on fails with `InvalidState` — so the builder adds all devices first and
+marks the template last. `MarkAsVirtualMachine` requires the `pool`
+argument (without it: "Required field 'pool' not provided"). Reading
+`vm.resourcePool` on a template fails pyVmomi deserialization
+(`KeyError: 'type'` in `SoapAdapter`) — a template has no pool, and
+vcsim serves the property as a malformed element. Nothing in the lab
+reads a template's pool.
+
+**vAppConfig is fully served.** `vAppConfig` on a VM (`VmConfigSpec`
+with `ProductSpec`/`PropertySpec` entries, operation `add`) is accepted
+on both `CreateVM` and `ReconfigVM`, and the full product info and
+properties read back — directly and via leaf retrieve. Note the type
+asymmetry: the write type is `VmConfigSpec`, the read-back type is
+`VmConfigInfo`.
+
+**vApps are created on ResourcePools.** `CreateVApp` is a
+`ResourcePool` method, not a `Folder` method (`vim.Folder` has no such
+method). It returns a `VirtualApp`; VMs are created inside it by passing
+it as the pool to `CreateVM_Task`. Destroying a vApp that still contains
+VMs leaves stale object references in vcsim's views (a later
+`ContainerView` can return a deleted VM's MoRef, and touching it raises
+`ManagedObjectNotFound`) — so teardown always deletes the VMs first and
+only then the (empty) vApp. Reading `VirtualApp.resourcePool` directly
+fails pyVmomi deserialization the same way a template's `resourcePool`
+does (`KeyError: 'type'`); teardown checks pool emptiness via leaf
+property retrieval instead, which omits the malformed property.
 
 **Synchronous creates.** `Folder.CreateFolder` and
 `ResourcePool.CreateResourcePool` return the object directly, not a
@@ -341,7 +448,7 @@ The image (`Dockerfile`, base `python:3.12-slim`) contains the vcsim
 binary plus the lab code. On start, `docker-entrypoint.sh` launches
 vcsim with the same inventory flags as `docker-compose.yml` on
 `0.0.0.0:${PORT:-8989}` (Render injects `$PORT`), waits for the SDK
-endpoint to answer, runs `scripts/build_lab.py` so the 12 VMs exist,
+endpoint to answer, runs `scripts/build_lab.py` so the 21 VMs exist,
 then keeps vcsim in the foreground. Run it locally the same way:
 
 ```bash
