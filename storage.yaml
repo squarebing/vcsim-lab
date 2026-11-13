@@ -1,0 +1,143 @@
+# Host storage inventory — declarative model for the storage vcsim cannot
+# provide (storage arrays, fabric HBAs, array LUNs) plus the mapping from
+# array LUNs to the lab's datastores.
+#
+# Why a YAML model? vSphere has no API to create HBAs or LUNs: they are
+# discovered hardware, not configurable objects. vcsim models only local
+# storage — a 32 GB SSD and a CD-ROM per host, on vmhba0/vmhba1 — and its
+# datastores are type OTHER with no VMFS extents, so nothing in the live
+# inventory links a datastore to a LUN. This file declares the shared
+# storage the lab is *meant* to have; `scripts/query_storage.py`
+# reconciles it against what vcsim actually serves (live HBAs, LUNs,
+# datastore mounts) and says plainly where the two diverge.
+#
+# Consistency rules (enforced by vcsim_lab/storage.py):
+# - `datastore` names must be the vcsim datastores (LocalDS_0..2); each
+#   datastore maps to at most one LUN.
+# - `hosts` keys must be the vcsim host names (DC0_C0_H0..H2, DC0_H0).
+# - Declared HBA device names must not collide with the live ones
+#   (vcsim serves vmhba0, vmhba1, vmhba64), so the fabric HBAs use
+#   vmhba2/vmhba3 (FC) and vmhba33 (software iSCSI).
+# - A host "sees" an array's LUNs when it has an HBA of the array's
+#   protocol (FC hosts see FC LUNs, iSCSI hosts see iSCSI LUNs).
+# - NAA names are 16 hex digits after `naa.`; WWPNs are 8 colon-separated
+#   hex octets; IQNs follow iqn.YYYY-MM.reverse-domain:name.
+#
+# See README "Host storage" for what vcsim serves vs. what is declared here.
+
+arrays:
+  - id: flash-array-01
+    vendor: Pure Storage
+    model: FlashArray//X70
+    protocol: fc
+    controllers: [CT0, CT1]
+    ports:
+      - { name: CT0.FC0, wwpn: "50:0a:09:80:00:01:02:03" }
+      - { name: CT0.FC1, wwpn: "50:0a:09:80:00:01:02:04" }
+      - { name: CT1.FC0, wwpn: "50:0a:09:80:00:01:02:05" }
+      - { name: CT1.FC1, wwpn: "50:0a:09:80:00:01:02:06" }
+    luns:
+      - id: fa-lun-00
+        label: flash-vol-00
+        naa: naa.624a937001000001
+        capacity_gb: 4096
+        datastore: LocalDS_0
+      - id: fa-lun-01
+        label: flash-vol-01
+        naa: naa.624a937001000002
+        capacity_gb: 4096
+        datastore: LocalDS_1
+
+  - id: iscsi-array-01
+    vendor: Dell EMC
+    model: PowerStore 1000T
+    protocol: iscsi
+    controllers: [NODE-A, NODE-B]
+    iqn: iqn.2015-10.com.dell:powerstore-1000t
+    ports:
+      - { name: NODE-A.eth0, portal: "10.20.30.11:3260" }
+      - { name: NODE-B.eth0, portal: "10.20.30.12:3260" }
+    luns:
+      - id: ps-lun-00
+        label: ps-vol-00
+        naa: naa.6000097000000001
+        capacity_gb: 4096
+        datastore: LocalDS_2
+
+hosts:
+  DC0_C0_H0:
+    hbas:
+      - device: vmhba2
+        type: fc
+        model: "Emulex LPe36000"
+        driver: lpfc
+        wwpn: "10:00:00:10:9b:01:02:11"
+        speed_gbps: 32
+      - device: vmhba3
+        type: fc
+        model: "Emulex LPe36000"
+        driver: lpfc
+        wwpn: "10:00:00:10:9b:01:02:12"
+        speed_gbps: 32
+      - device: vmhba33
+        type: iscsi
+        model: "VMware iSCSI Software Adapter"
+        driver: iscsi_vmk
+        iqn: iqn.1998-01.com.vmware:dc0-c0-h0-iscsi
+  DC0_C0_H1:
+    hbas:
+      - device: vmhba2
+        type: fc
+        model: "Emulex LPe36000"
+        driver: lpfc
+        wwpn: "10:00:00:10:9b:01:02:21"
+        speed_gbps: 32
+      - device: vmhba3
+        type: fc
+        model: "Emulex LPe36000"
+        driver: lpfc
+        wwpn: "10:00:00:10:9b:01:02:22"
+        speed_gbps: 32
+      - device: vmhba33
+        type: iscsi
+        model: "VMware iSCSI Software Adapter"
+        driver: iscsi_vmk
+        iqn: iqn.1998-01.com.vmware:dc0-c0-h1-iscsi
+  DC0_C0_H2:
+    hbas:
+      - device: vmhba2
+        type: fc
+        model: "Emulex LPe36000"
+        driver: lpfc
+        wwpn: "10:00:00:10:9b:01:02:31"
+        speed_gbps: 32
+      - device: vmhba3
+        type: fc
+        model: "Emulex LPe36000"
+        driver: lpfc
+        wwpn: "10:00:00:10:9b:01:02:32"
+        speed_gbps: 32
+      - device: vmhba33
+        type: iscsi
+        model: "VMware iSCSI Software Adapter"
+        driver: iscsi_vmk
+        iqn: iqn.1998-01.com.vmware:dc0-c0-h2-iscsi
+  DC0_H0:
+    hbas:
+      - device: vmhba2
+        type: fc
+        model: "Emulex LPe36000"
+        driver: lpfc
+        wwpn: "10:00:00:10:9b:01:02:41"
+        speed_gbps: 32
+      - device: vmhba3
+        type: fc
+        model: "Emulex LPe36000"
+        driver: lpfc
+        wwpn: "10:00:00:10:9b:01:02:42"
+        speed_gbps: 32
+      - device: vmhba33
+        type: iscsi
+        model: "VMware iSCSI Software Adapter"
+        driver: iscsi_vmk
+        iqn: iqn.1998-01.com.vmware:dc0-h0-iscsi

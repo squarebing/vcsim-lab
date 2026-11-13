@@ -32,6 +32,7 @@ python scripts/build_lab.py
 python scripts/query_lab.py            # table
 python scripts/query_lab.py --json     # machine-readable
 python scripts/query_lab.py --pci      # host PCI devices (GPU inventory)
+python scripts/query_storage.py        # host storage: HBAs, LUNs, mounts
 python scripts/verify_lab.py           # live lab vs vms.yaml
 ```
 
@@ -51,6 +52,7 @@ docker-compose.yml       vcsim container (vmware/vcsim:v0.56.2)
 requirements.txt         pyvmomi>=8.0, pyyaml>=6.0
 .env.example             VC_HOST/PORT/USER/PASSWORD, VC_INSECURE, VCSIM_VERSION
 PROMPTS.md               log of the prompts that built this project
+storage.yaml             host storage model: arrays, LUNs, fabric HBAs, LUN -> datastore
 
 vcsim_lab/
   config.py              YAML -> dataclasses + validation (guest IDs, hex PCI IDs)
@@ -59,12 +61,14 @@ vcsim_lab/
   vcenter.py             connect, leaf property retrieval, task waiting, lookups
   build.py               idempotent builder + per-VM step report
   query.py               reference read path: summarize one/all VMs
+  storage.py             storage model (YAML -> dataclasses) + live reconciliation
   verify.py              live lab vs vms.yaml (core checks fail, best-effort warn)
   teardown.py            delete the lab VMs
 
 scripts/
   build_lab.py           [--only NAME ...] [--recreate] [--report FILE] [--plan-only]
   query_lab.py           [--json] [--inventory] [--pci] [--guest-ids]
+  query_storage.py       [--json] [--only HOST ...] [--storage-yaml FILE]
   verify_lab.py          exit code 0 when all core checks pass
   teardown_lab.py        delete the lab VMs
 
@@ -73,7 +77,9 @@ tools/
   stop-vcsim-binary.sh
   save-model.sh          govc object.save -> ./model for fast restarts (vcsim -load)
 
-tests/test_specs.py      20 offline tests (no vCenter needed): pytest tests/ -q
+tests/test_specs.py      20 offline tests (VM planner/builder)
+tests/test_storage.py    23 offline tests (storage model + reconcile)
+                         run all: pytest tests/ -q (no vCenter needed)
 ```
 
 ## The lab
@@ -101,6 +107,45 @@ Folders `lab-windows`, `lab-linux`, `lab-gpu`; resource pools
 
 GPU VMs also get a full memory reservation and the Broadcom KB 334594
 extraConfig (`pciPassthru.use64bitMMIO=TRUE`, `pciPassthru.64bitMMIOSizeGB`).
+
+## Host storage
+
+`storage.yaml` declares the shared storage the lab is *meant* to have —
+two arrays, their LUNs, fabric HBAs per host, and the LUN → datastore
+mapping — and `scripts/query_storage.py` reconciles it against what
+vcsim actually serves:
+
+```bash
+python scripts/query_storage.py            # per-host table
+python scripts/query_storage.py --json     # full reconciled report
+python scripts/query_storage.py --only DC0_C0_H0
+```
+
+Declared model: `flash-array-01` (Pure Storage FlashArray//X70, Fibre
+Channel, 2 LUNs → LocalDS_0/1) and `iscsi-array-01` (Dell EMC PowerStore
+1000T, iSCSI, 1 LUN → LocalDS_2). Every host has two 32 Gbps FC HBAs
+(vmhba2/vmhba3, with WWPNs) and one software-iSCSI HBA (vmhba33, with an
+initiator IQN); a host "sees" an array's LUNs when it has an HBA of the
+array's protocol. NAA names, WWPNs and IQNs are validated on load
+(`storage.load_storage`); each datastore maps to at most one LUN.
+
+What vcsim serves vs. what is declared — the query says this plainly,
+and so does the report's `notes`:
+
+| | Live (vcsim) | Declared (storage.yaml) |
+|---|---|---|
+| HBAs | vmhba0 (PVSCSI), vmhba1 + vmhba64 (IDE) — local only | vmhba2/3 FC + vmhba33 iSCSI |
+| SCSI LUNs | 32 GB local SSD + CD-ROM per host (`mpx.*`, no NAA names) | 3 array LUNs with NAA names |
+| Multipath / topology | served: 1 active path per LUN, policy FIXED | — |
+| Software iSCSI | disabled | iSCSI HBA declared per host |
+| Datastore mounts | served: all 3 datastores on all 4 hosts, readWrite | — |
+| Datastore → LUN backing | not served: datastores are type OTHER, no VMFS extents | LUN per datastore, declared only |
+
+There is no API to create HBAs or LUNs in vSphere — they are discovered
+hardware — so the declared half can never be "built" into vcsim; it is a
+model to query against. Against a real vCenter the same code reads the
+real FC/iSCSI HBAs and, for VMFS datastores, verifies the backing LUN
+from the extent disk names (`backing_verified_live`).
 
 ## How it works
 
@@ -178,7 +223,22 @@ polls `info.state` / `info.error` that way. Never read `vm.summary`,
 and `QueryConfigOption` fails deserializing an empty `SharesInfo.Level`
 enum. `--guest-ids` therefore prints an explanation instead of a list.
 GPU host discovery uses `HostSystem.configManager` / PCI device reads
-that *are* served.
+that *are* served. But leaf paths under `config.storageDevice` *are*
+served: `config.storageDevice.hostBusAdapter` / `scsiLun` return through
+the PropertyCollector even though whole `host.config` raises —
+`storage.live_host_storage` uses them as a fallback.
+
+**Host storage is served, but only local.** `HostStorageSystem.storageDeviceInfo`
+(HBAs, SCSI LUNs, topology, multipath, software-iSCSI state) *is*
+served, via leaf retrieves — each host has vmhba0 (PVSCSI), vmhba1 +
+vmhba64 (PIIX4 IDE), a 32 GB local SSD (`mpx.vmhba0:C0:T0:L0`) and a
+CD-ROM, one active multipath path per LUN (policy FIXED), and software
+iSCSI disabled. But there are no FC/iSCSI HBAs, no NAA-named LUNs and
+no arrays, and the datastores are type OTHER with `LocalDatastoreInfo`
+(not VMFS), so there are no extents linking a datastore to a LUN. The
+storage model in `storage.yaml` declares that half instead, and
+`query_storage.py` reconciles the two. The StoragePod (`DC0_POD0`) is
+empty (capacity 0, no member datastores).
 
 **Cross-datastore disks need their directories pre-created.**
 `CreateVM` fails with `FileNotFound` unless the VM's directory already

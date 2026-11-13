@@ -59,3 +59,18 @@ on the repo page.
 > Keep track of prompts used in the project
 
 Outcome: this file.
+
+## 8. 2026-11-13 13:22 — Add host storage info
+
+> add storage info to hosts, such as storage arrays, HBA, SCSI Luns and mounts
+
+Outcome: host storage inventory. Probed vcsim first: it serves per-host
+HBAs (vmhba0 PVSCSI, vmhba1/vmhba64 IDE), two local LUNs (32 GB SSD +
+CD-ROM, `mpx.*` names), SCSI topology, multipath info (1 active path per
+LUN, FIXED) and datastore mounts — but no FC/iSCSI HBAs, no NAA LUNs, no
+arrays, and datastores are type OTHER with no VMFS extents. Added
+`storage.yaml` (declared model: FC array + iSCSI array, 3 LUNs mapped to
+LocalDS_0/1/2, fabric HBAs per host), `vcsim_lab/storage.py` (model
+validation + live reconciliation), `scripts/query_storage.py` (per-host
+table / `--json`), and `tests/test_storage.py` (23 offline tests; 43
+total). README documents what vcsim serves vs. what is declared.
