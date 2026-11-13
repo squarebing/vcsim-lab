@@ -1,0 +1,56 @@
+# vcsim lab — 1 datacenter, 1 cluster (3 hosts) + 1 standalone host,
+# 3 datastores, 2 DV portgroups, 1 NSX opaque network, 0 stock VMs.
+# The lab VMs in vms.yaml are created by scripts/build_lab.py, so the
+# simulator starts with a clean slate (-vm 0).
+#
+# Start:  docker compose up -d
+# Logs:   docker compose logs -f vcsim
+# Stop:   docker compose down
+#
+# vcsim listens on 127.0.0.1:8989 by default; the SDK endpoint is
+# https://127.0.0.1:8989/sdk (self-signed cert — pyVmomi connects with an
+# unverified context, see vcsim_lab/vcenter.py).
+#
+# Pin: vmware/vcsim:v0.56.2 (govmomi release, Nov 2026). Use :latest to
+# float, or change the tag to match a govmomi release you have validated.
+services:
+  vcsim:
+    image: vmware/vcsim:v0.56.2
+    container_name: vcsim-lab
+    ports:
+      - "127.0.0.1:8989:8989"
+    command:
+      - "-l"
+      - "0.0.0.0:8989"
+      - "-api-version"
+      - "8.0.3"
+      - "-dc"
+      - "1"
+      - "-cluster"
+      - "1"
+      - "-host"
+      - "3"
+      - "-standalone-host"
+      - "1"
+      - "-ds"
+      - "3"
+      - "-pod"
+      - "1"
+      - "-pg"
+      - "2"
+      - "-nsx"
+      - "1"
+      - "-pool"
+      - "1"
+      - "-vm"
+      - "0"
+      - "-username"
+      - "${VCSIM_USERNAME:-user}"
+      - "-password"
+      - "${VCSIM_PASSWORD:-pass}"
+    # To start from a previously saved model instead of a generated one,
+    # save it first (tools/save-model.sh) and then add:
+    #   volumes:
+    #     - ./model:/model:ro
+    # and replace the command flags above with:
+    #   command: ["-load", "/model", "-l", "0.0.0.0:8989"]

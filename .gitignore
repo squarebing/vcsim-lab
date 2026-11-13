@@ -1,0 +1,12 @@
+# vcsim runtime artifacts (downloaded binaries, saved models, logs)
+/bin/
+/model/
+DC0-LocalDS_*/
+
+# local environment (copy .env.example to .env)
+.env
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/

@@ -1,0 +1,344 @@
+# vcsim lab inventory — declarative VM matrix.
+#
+# This file is the single source of truth for the lab. Edit it, then run:
+#   python scripts/build_lab.py
+# to (re)build the lab, and:
+#   python scripts/verify_lab.py
+# to check the live inventory still matches it.
+#
+# Design notes:
+# - `guest_id` must be a valid vSphere guest OS identifier. The builder warns
+#   on IDs outside the known-good list in vcsim_lab/config.py, but vcsim itself
+#   accepts any string. Run `python scripts/query_lab.py --guest-ids` to list
+#   the IDs the simulator advertises.
+# - `firmware: efi` is required for TPM and for GPU passthrough / vGPU.
+# - `boot_order` uses symbolic tokens, resolved to real device keys after the
+#   VM is created: disk, disk:2, network, network:2, cdrom, floppy.
+# - GPU `mode: passthrough` binds a real host PCI device if a display-class
+#   device is found on a cluster host, and falls back to `dynamic`
+#   (DynamicBackingInfo, vCenter picks a matching device at power-on) when the
+#   simulator has no GPU to bind. `vgpu` attaches an NVIDIA vGPU profile.
+# - Disks: `thin: true` = thin provisioned, `thin: false` + `eager: true` =
+#   thick eager-zeroed, `thin: false` + `eager: false` = thick lazy-zeroed.
+# - `datastore` names must exist in the vcsim inventory (default compose file
+#   creates LocalDS_0..2). The builder lists available datastores on error.
+
+lab:
+  datacenter: DC0
+  cluster: DC0_C0
+  # VM folders created under the datacenter's vm folder.
+  folders:
+    - lab-windows
+    - lab-linux
+    - lab-gpu
+  # Resource pools created under the cluster's root resource pool.
+  resource_pools:
+    - lab-general
+    - lab-gpu
+
+# Logical network names -> inventory objects. `type` selects the backing:
+#   standard = Network (vim.vm.device.VirtualEthernetCard.NetworkBackingInfo)
+#   dvpg     = DistributedVirtualPortgroup
+#   opaque   = OpaqueNetwork (NSX). If the inventory has no opaque network
+#              (vcsim started without -nsx), NICs on it fall back to
+#              `vm-network` and the build report records the substitution.
+networks:
+  vm-network:
+    name: "VM Network"
+    type: standard
+  prod:
+    name: DC0_DVPG0
+    type: dvpg
+  backup:
+    name: DC0_DVPG1
+    type: dvpg
+  nsx-overlay:
+    name: DC0_NSX0
+    type: opaque
+    fallback: vm-network
+
+vms:
+  # ---- Windows ---------------------------------------------------------
+  - name: win11-secure
+    annotation: "Windows 11 desktop, Secure Boot + vTPM (Windows 11 baseline)"
+    guest_id: windows11_64Guest
+    os_label: "Windows 11 23H2 (64-bit)"
+    cpus: 4
+    cores_per_socket: 2
+    memory_mb: 8192
+    hardware_version: vmx-20
+    firmware: efi
+    secure_boot: true
+    tpm: true
+    folder: lab-windows
+    resource_pool: lab-general
+    power_on: true
+    cpu_hot_add: true
+    memory_hot_add: true
+    disks:
+      - { size_gb: 100, controller: nvme, datastore: LocalDS_0, thin: true }
+    nics:
+      - { network: prod, type: vmxnet3 }
+    cdrom: { backing: client }
+    boot_order: [disk, cdrom]
+
+  - name: win2022-sql
+    annotation: "Windows Server 2022, SQL host: OS + eager-zeroed data disk, dual NIC"
+    guest_id: windows2019srvNext_64Guest
+    os_label: "Windows Server 2022 (64-bit)"
+    cpus: 8
+    cores_per_socket: 4
+    memory_mb: 16384
+    hardware_version: vmx-20
+    firmware: efi
+    secure_boot: false
+    tpm: true
+    folder: lab-windows
+    resource_pool: lab-general
+    power_on: true
+    disks:
+      - { size_gb: 100, controller: pvscsi, datastore: LocalDS_0, thin: true }
+      - { size_gb: 500, controller: pvscsi, datastore: LocalDS_1, thin: false, eager: true }
+    nics:
+      - { network: prod, type: vmxnet3 }
+      - { network: backup, type: vmxnet3 }
+    cdrom: null
+    boot_order: [disk]
+
+  - name: win10-vdi
+    annotation: "Windows 10 VDI desktop with 3D video (no PCI GPU)"
+    guest_id: windows9_64Guest
+    os_label: "Windows 10 (64-bit)"
+    cpus: 4
+    cores_per_socket: 2
+    memory_mb: 8192
+    hardware_version: vmx-20
+    firmware: efi
+    secure_boot: true
+    tpm: true
+    video_3d: true
+    video_ram_kb: 131072
+    folder: lab-windows
+    resource_pool: lab-general
+    power_on: true
+    disks:
+      - { size_gb: 80, controller: nvme, datastore: LocalDS_0, thin: true }
+    nics:
+      - { network: prod, type: vmxnet3 }
+    cdrom: null
+    boot_order: [disk]
+
+  # ---- GPU -------------------------------------------------------------
+  - name: ubuntu-gpu-llm
+    annotation: "Ubuntu LLM inference node, PCI passthrough GPU (T4 class)"
+    guest_id: ubuntu64Guest
+    os_label: "Ubuntu Linux 24.04 (64-bit)"
+    cpus: 8
+    cores_per_socket: 4
+    memory_mb: 32768
+    hardware_version: vmx-20
+    firmware: efi
+    secure_boot: false
+    tpm: false
+    gpu:
+      mode: passthrough
+      vendor_id: "0x10de"   # NVIDIA
+      device_id: "0x1eb8"   # Tesla T4 (used for the dynamic fallback)
+      label: "Tesla T4"
+      mmio_size_gb: 32
+    folder: lab-gpu
+    resource_pool: lab-gpu
+    power_on: false
+    disks:
+      - { size_gb: 200, controller: nvme, datastore: LocalDS_0, thin: true }
+    nics:
+      - { network: prod, type: vmxnet3 }
+    cdrom: null
+    boot_order: [disk]
+
+  - name: ubuntu-vgpu-vdi
+    annotation: "Ubuntu VDI node, NVIDIA vGPU profile (shared GPU, no passthrough)"
+    guest_id: ubuntu64Guest
+    os_label: "Ubuntu Linux 24.04 (64-bit)"
+    cpus: 4
+    cores_per_socket: 2
+    memory_mb: 16384
+    hardware_version: vmx-20
+    firmware: efi
+    secure_boot: false
+    tpm: false
+    gpu:
+      mode: vgpu
+      profile: nvidia_a100-40c
+      label: "vGPU A100-40C"
+    folder: lab-gpu
+    resource_pool: lab-gpu
+    power_on: false
+    disks:
+      - { size_gb: 100, controller: nvme, datastore: LocalDS_0, thin: true }
+    nics:
+      - { network: prod, type: vmxnet3 }
+    cdrom: null
+    boot_order: [disk]
+
+  - name: rhel9-ai-train
+    annotation: "RHEL 9 AI training node, dynamic GPU + vTPM + Secure Boot, dual NIC"
+    guest_id: rhel9_64Guest
+    os_label: "Red Hat Enterprise Linux 9 (64-bit)"
+    cpus: 16
+    cores_per_socket: 8
+    memory_mb: 65536
+    hardware_version: vmx-20
+    firmware: efi
+    secure_boot: true
+    tpm: true
+    gpu:
+      mode: dynamic
+      vendor_id: "0x10de"   # NVIDIA
+      device_id: "0x20b0"   # A100 PCIe
+      label: "A100 PCIe"
+      mmio_size_gb: 128
+    folder: lab-gpu
+    resource_pool: lab-gpu
+    power_on: false
+    disks:
+      - { size_gb: 500, controller: nvme, datastore: LocalDS_1, thin: true }
+    nics:
+      - { network: prod, type: vmxnet3 }
+      - { network: nsx-overlay, type: vmxnet3 }
+    cdrom: null
+    boot_order: [disk]
+
+  # ---- Linux -----------------------------------------------------------
+  - name: debian12-web
+    annotation: "Debian 12 web server, BIOS + PXE-first boot, E1000 on VM Network"
+    guest_id: debian12_64Guest
+    os_label: "Debian GNU/Linux 12 (64-bit)"
+    cpus: 2
+    cores_per_socket: 1
+    memory_mb: 4096
+    hardware_version: vmx-19
+    firmware: bios
+    secure_boot: false
+    tpm: false
+    folder: lab-linux
+    resource_pool: lab-general
+    power_on: true
+    disks:
+      - { size_gb: 40, controller: lsi-sas, datastore: LocalDS_2, thin: true }
+    nics:
+      - { network: vm-network, type: e1000 }
+    cdrom: null
+    boot_order: [network, disk]
+
+  - name: rhel9-db
+    annotation: "RHEL 9 database host: OS + data + log disks across 3 datastores"
+    guest_id: rhel9_64Guest
+    os_label: "Red Hat Enterprise Linux 9 (64-bit)"
+    cpus: 8
+    cores_per_socket: 4
+    memory_mb: 32768
+    hardware_version: vmx-20
+    firmware: efi
+    secure_boot: false
+    tpm: false
+    folder: lab-linux
+    resource_pool: lab-general
+    power_on: true
+    disks:
+      - { size_gb: 80, controller: pvscsi, datastore: LocalDS_0, thin: true }
+      - { size_gb: 500, controller: pvscsi, datastore: LocalDS_1, thin: false, eager: true }
+      - { size_gb: 200, controller: pvscsi, datastore: LocalDS_2, thin: true }
+    nics:
+      - { network: prod, type: vmxnet3 }
+    cdrom: { backing: client }
+    boot_order: [disk, cdrom]
+
+  - name: sles15-sap
+    annotation: "SLES 15 app host, CD-ROM-first boot (install media), vTPM"
+    guest_id: sles15_64Guest
+    os_label: "SUSE Linux Enterprise 15 (64-bit)"
+    cpus: 8
+    cores_per_socket: 4
+    memory_mb: 32768
+    hardware_version: vmx-20
+    firmware: efi
+    secure_boot: true
+    tpm: true
+    folder: lab-linux
+    resource_pool: lab-general
+    power_on: false
+    disks:
+      - { size_gb: 150, controller: nvme, datastore: LocalDS_0, thin: true }
+    nics:
+      - { network: prod, type: vmxnet3 }
+    cdrom: { backing: client }
+    boot_order: [cdrom, disk]
+
+  - name: freebsd13-nas
+    annotation: "FreeBSD 13 storage node, BIOS, OS + 2 data disks, E1000e"
+    guest_id: freebsd13_64Guest
+    os_label: "FreeBSD 13 (64-bit)"
+    cpus: 2
+    cores_per_socket: 1
+    memory_mb: 4096
+    hardware_version: vmx-19
+    firmware: bios
+    secure_boot: false
+    tpm: false
+    folder: lab-linux
+    resource_pool: lab-general
+    power_on: true
+    disks:
+      - { size_gb: 60, controller: lsi-logic, datastore: LocalDS_2, thin: true }
+      - { size_gb: 200, controller: lsi-sas, datastore: LocalDS_2, thin: true }
+      - { size_gb: 200, controller: lsi-sas, datastore: LocalDS_2, thin: true }
+    nics:
+      - { network: vm-network, type: e1000e }
+    cdrom: null
+    boot_order: [disk]
+
+  - name: centos8-legacy
+    annotation: "CentOS 8 legacy host, BIOS, thick lazy-zeroed disk"
+    guest_id: centos8_64Guest
+    os_label: "CentOS 8 (64-bit)"
+    cpus: 2
+    cores_per_socket: 1
+    memory_mb: 2048
+    hardware_version: vmx-19
+    firmware: bios
+    secure_boot: false
+    tpm: false
+    folder: lab-linux
+    resource_pool: lab-general
+    power_on: false
+    disks:
+      - { size_gb: 60, controller: lsi-logic, datastore: LocalDS_2, thin: false, eager: false }
+    nics:
+      - { network: vm-network, type: e1000 }
+    cdrom: null
+    boot_order: [disk, network]
+
+  - name: ubuntu-k8s-node
+    annotation: "Ubuntu Kubernetes worker, dual NIC (prod + backup), EFI"
+    guest_id: ubuntu64Guest
+    os_label: "Ubuntu Linux 24.04 (64-bit)"
+    cpus: 4
+    cores_per_socket: 2
+    memory_mb: 8192
+    hardware_version: vmx-20
+    firmware: efi
+    secure_boot: false
+    tpm: false
+    folder: lab-linux
+    resource_pool: lab-general
+    power_on: true
+    cpu_hot_add: true
+    memory_hot_add: true
+    disks:
+      - { size_gb: 100, controller: nvme, datastore: LocalDS_0, thin: true }
+    nics:
+      - { network: prod, type: vmxnet3 }
+      - { network: backup, type: vmxnet3 }
+    cdrom: null
+    boot_order: [disk, network]
