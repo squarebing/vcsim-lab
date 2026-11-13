@@ -73,22 +73,24 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Trigger Render deploy
-        if: ${{ secrets.RENDER_DEPLOY_HOOK != '' }}
+      # NOTE: GitHub does not allow the `secrets` context in `if`
+      # conditionals (the parser rejects it with "Unrecognized
+      # named-value: 'secrets'"), so the hook check happens in shell
+      # instead of a step `if`.
+      - name: Trigger Render deploy (if configured)
         env:
           RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
         run: |
+          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
+            {
+              echo "## Render deploy skipped"
+              echo ""
+              echo "The image was pushed to Docker Hub, but no Render deploy was triggered: \`RENDER_DEPLOY_HOOK\` is not set as a repository secret."
+              echo ""
+              echo "To wire it up: Render Dashboard -> your vcsim-lab service -> Settings -> Deploy Hook -> copy the URL, then add it as the \`RENDER_DEPLOY_HOOK\` secret under GitHub -> repo -> Settings -> Secrets and variables -> Actions."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::RENDER_DEPLOY_HOOK is not set — skipping the Render deploy step."
+            exit 0
+          fi
           curl -fsS -X POST "$RENDER_DEPLOY_HOOK"
           echo "Render deploy triggered."
-
-      - name: Render deploy hook not configured
-        if: ${{ secrets.RENDER_DEPLOY_HOOK == '' }}
-        run: |
-          {
-            echo "## Render deploy skipped"
-            echo ""
-            echo "The image was pushed to Docker Hub, but no Render deploy was triggered: \`RENDER_DEPLOY_HOOK\` is not set as a repository secret."
-            echo ""
-            echo "To wire it up: Render Dashboard -> your vcsim-lab service -> Settings -> Deploy Hook -> copy the URL, then add it as the \`RENDER_DEPLOY_HOOK\` secret under GitHub -> repo -> Settings -> Secrets and variables -> Actions."
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "::notice::RENDER_DEPLOY_HOOK is not set — skipping the Render deploy step."
