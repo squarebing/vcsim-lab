@@ -163,3 +163,44 @@ retrieval for the emptiness check because reading
 21 VMs / 69 steps / 0 failed in ~6s; verify 0 failures, 5 Secure Boot
 warnings (the known vcsim limitation); save/load round-trip restores
 all 21 VMs; 72 tests (23 new in `tests/test_gpu_vapp.py`).
+
+## 13. 2026-11-13 15:09 — Random CBT, power state, tools status, fast boot
+
+> add random CBT, power state, tool status and fast boot to VMs
+
+Outcome: four per-VM attributes now vary across the lab, each an
+explicit value or `"random"` in `vms.yaml`, resolved from
+`lab.random_seed` (42) at build time. Probing first showed what vcsim
+actually serves: `changeTrackingEnabled` is accepted in create and
+reconfig specs and reads back; `bootOptions.bootDelay` is stored and
+served back; `SuspendVM_Task` works and `suspended` reads back as the
+power state (PowerOn resumes it); but `guest.toolsStatus` is always
+`toolsNotInstalled` / `guestToolsNotRunning` in every power state —
+vcsim never simulates guest tools, and there is no setter API for it.
+Two interpretation calls: there is no native vSphere VM "fast boot"
+setting (only host-level ESXi Quick Boot), so fast boot is represented
+as `bootDelay = 0` vs. the standard 3000 ms; and tools status is
+declared-only — the query tool shows live + declared and flags
+mismatches, and verify treats it as a best-effort warning. Resolution
+is seeded per VM (`"<seed>:<vm-name>"`, fixed draw order cbt →
+power_state → fast_boot → tools_status), so the same seed always gives
+the same assignment and adding a VM never reshuffles the others; the
+build report records each VM's assigned values. Templates are exempt
+from power-state assignment (always `poweredOff`, `power_state:` on a
+template is rejected); appliances keep explicit `poweredOn`. The
+builder sets CBT in the create spec, reconciles it on re-runs (powering
+the VM off first, since real vCenter requires that), and enforces the
+power state (suspend = power on, then suspend); changing the seed
+reconciles the lab to the new assignment without a rebuild. Seed 42
+lands at 9 poweredOn / 6 suspended / 6 poweredOff, CBT on 9/21,
+fast-boot 8/21, all four tools statuses declared. The teardown →
+rebuild cycle exposed a vcsim quirk: destroying a template leaves a
+stale MOR in the ContainerView (one per destroyed template, never
+clearing), which crashed `find_vm_by_name`, the batched leaf retrieve
+and `--inventory` — fixed with `vcenter.safe_name` (skip stale entries
+in name lookups) plus a per-object fallback in `retrieve_props_multi`
+and a stale-entry skip in `summarize_lab`. Teardown also now powers off
+suspended VMs before destroying them. Full build 21 VMs /
+75 steps / 0 failed; verify 0 failures, 22 warnings (5 Secure Boot +
+17 tools status, both vcsim limitations); idempotent re-run is a
+no-op on CBT/power; 97 tests (25 new in `tests/test_random_attrs.py`).

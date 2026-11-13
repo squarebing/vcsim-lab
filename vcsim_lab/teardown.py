@@ -53,7 +53,9 @@ def teardown_lab(
             if vm is None:
                 log.append(f"{spec.name}: not present, skipped")
                 continue
-            if vm_power_state(si, vm) == vim.VirtualMachinePowerState.poweredOn:
+            # Power off anything that is not already off — a suspended VM
+            # must be powered off before it can be destroyed.
+            if vm_power_state(si, vm) != "poweredOff":
                 task = vm.PowerOffVM_Task()
                 wait_for_task(si, task, label=f"power off {spec.name}")
             task = vm.Destroy_Task()

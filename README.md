@@ -13,9 +13,10 @@ The builder is idempotent (re-runs skip existing VMs) and reports, per VM,
 exactly which steps vcsim accepted.
 
 Validated end to end against govmomi **v0.56.2** on 2026-11-13:
-full build 21 VMs / 69 steps / 0 failed, verify 0 failures
-(5 Secure Boot warnings — a vcsim limitation, see below), and a
-save/load round-trip that restores all 21 VMs.
+full build 21 VMs / 75 steps / 0 failed, verify 0 failures
+(5 Secure Boot warnings + 17 tools-status warnings — both vcsim
+limitations, see below), and a save/load round-trip that restores
+all 21 VMs.
 
 ## Quickstart
 
@@ -154,8 +155,10 @@ Three VMs (`win2022-template`, `ubuntu-2404-template`, `rhel9-template`)
 are marked as vSphere templates: `template: true` in `vms.yaml`, and the
 builder calls `MarkAsTemplate()` as the **last** step, after every device
 extra — device reconfigs on a template are rejected (vcsim answers
-`NotSupported`). Templates cannot be powered on, so `template: true`
-requires `power_on: false` (validated on load). The query tool marks
+`NotSupported`). Templates cannot be powered on, so they are exempt
+from power-state assignment: `template: true` requires `power_on:
+false` and rejects `power_state:` (validated on load); templates
+always resolve to `poweredOff`. The query tool marks
 them `[template]`; `verify.py` checks `config.template` as a core check.
 On a re-run the builder skips all extras for a VM that is already a
 template. Teardown destroys templates directly — no conversion back is
@@ -182,6 +185,53 @@ and properties, and `verify.py` checks them as core checks. The vApp
 container itself is created with `ResourcePool.CreateVApp` (a
 `ResourcePool` method, not a `Folder` method) and is removed by
 `teardown_lab.py --remove-pools` once its VMs are gone.
+
+### Randomized VM attributes
+
+Four per-VM attributes vary across the lab — Changed Block Tracking
+(CBT), power state, fast boot, and VMware Tools status — each set
+explicitly or to `random` in `vms.yaml` and resolved from
+`lab.random_seed` (default 42) at build time:
+
+```yaml
+lab:
+  random_seed: 42
+
+  - name: win2022-sql
+    cbt: true                # explicit: backup-friendly DB host
+    power_state: random      # poweredOn | poweredOff | suspended
+    fast_boot: random        # true | false
+    tools_status: random     # toolsNotInstalled | toolsNotRunning | toolsOk | toolsOld
+```
+
+The assignment is **seeded, not random per run**: each VM draws from
+its own RNG seeded with `"<seed>:<vm-name>"`, in the fixed order cbt →
+power_state → fast_boot → tools_status, and only for fields set to
+`random`. The same `vms.yaml` + seed always gives the same assignment,
+and adding a VM never reshuffles the others. Change the seed and the
+next build reconciles the lab to the new assignment (CBT is changed via
+reconfig — the VM is powered off first, since real vCenter requires
+that — and the power-state step restores the target state afterwards).
+The build report records each VM's assigned values (`assigned: cbt=…
+power=… fast_boot=… tools=…`), and `verify.py` checks the live lab
+against the same resolution. With seed 42 the lab lands at 9 poweredOn
+/ 6 suspended / 6 poweredOff, CBT on 9/21, fast-boot 8/21, and all four
+tools statuses declared.
+
+What vcsim serves vs. what is declared-only (probed live against
+v0.56.2):
+
+| Attribute | vSphere field | Served by vcsim? | How the lab treats it |
+|---|---|---|---|
+| CBT | `ConfigSpec.changeTrackingEnabled` | Yes — accepted in create + reconfig specs, reads back | Set in the create spec; reconciled on re-runs; **core** verify check |
+| Power state | `runtime.powerState` | Yes — PowerOn, PowerOff and `SuspendVM_Task` all work; suspended reads back as `suspended` | Enforced after create (suspend = power on, then suspend); **core** verify check |
+| Fast boot | `bootOptions.bootDelay` | Yes — stored and served back | **There is no native vSphere VM "fast boot" setting** (the only quick-boot fields are host-level ESXi Quick Boot). The lab represents it as `bootDelay = 0` (boot immediately) vs. the standard 3000 ms; **core** verify check |
+| Tools status | `GuestInfo.toolsStatus` | No — always `toolsNotInstalled` / `guestToolsNotRunning`, in every power state; no setter API exists | Declared only. The query tool shows live + declared and flags mismatches; **best-effort** verify warning |
+
+Templates are exempt from power-state assignment (they always stay
+`poweredOff`); the two appliances keep explicit `power_state:
+poweredOn`. A VM with no `power_state` derives it from the legacy
+`power_on:` flag.
 
 ## Host storage
 
@@ -234,24 +284,31 @@ assigns the real keys.
 
 **Create carries core devices only** (controllers, disks, NICs, CD-ROM)
 plus the appliance `vAppConfig` (accepted on `CreateVM` and served back
-intact). Boot order, TPM, GPU and video are applied afterwards as separate
-best-effort `ReconfigVM_Task` steps, each recorded in the build report, so
-one device the simulator refuses cannot fail the whole VM. This split is
-also forced by vcsim behaviour (see below): the video card *must* be a
-post-create edit, and Secure Boot is sent with the boot-order reconfig.
-Template marking (`MarkAsTemplate`) runs after all of them, last of all.
+intact) and the CBT flag (`changeTrackingEnabled`). Boot order (with
+the fast-boot/standard boot delay), TPM, GPU and video are applied
+afterwards as separate best-effort `ReconfigVM_Task` steps, each
+recorded in the build report, so one device the simulator refuses
+cannot fail the whole VM. This split is also forced by vcsim behaviour
+(see below): the video card *must* be a post-create edit, and Secure
+Boot is sent with the boot-order reconfig. The CBT reconcile and
+power-state steps run after the device extras (CBT first — it needs
+the VM powered off); template marking (`MarkAsTemplate`) runs after
+all of them, last of all.
 
-**Idempotent.** Existing VMs are skipped unless `--recreate` is given;
-folders and resource pools are ensured; datastores and networks are
-resolved up front so a typo in `vms.yaml` fails fast instead of
-halfway through the build. `--plan-only` prints the device plan without
-connecting.
+**Idempotent.** Existing VMs are skipped unless `--recreate` is given
+(their per-VM attributes are still reconciled against the resolved
+assignment on every run — CBT, boot delay and power state converge
+without a rebuild); folders and resource pools are ensured; datastores
+and networks are resolved up front so a typo in `vms.yaml` fails fast
+instead of halfway through the build. `--plan-only` prints the device
+plan without connecting.
 
 **Verify semantics.** Core mismatches (CPU, memory, guest, firmware,
-disks, NICs, boot order, power, video 3D, template flag, vApp product +
-properties) are failures. TPM, GPU and Secure Boot mismatches are
-warnings: vcsim accepts the devices but serves some of their detail back
-degraded, and drops the Secure Boot flag entirely (see below). Template
+disks, NICs, boot order, power, CBT, boot delay, video 3D, template
+flag, vApp product + properties) are failures. TPM, GPU, Secure Boot
+and tools status mismatches are warnings: vcsim accepts the devices
+but serves some of their detail back degraded, drops the Secure Boot
+flag entirely, and never reports guest tools (see below). Template
 and vApp checks are core because vcsim serves `config.template` and the
 full `vAppConfig` back reliably.
 
@@ -379,6 +436,30 @@ argument (without it: "Required field 'pool' not provided"). Reading
 (`KeyError: 'type'` in `SoapAdapter`) — a template has no pool, and
 vcsim serves the property as a malformed element. Nothing in the lab
 reads a template's pool.
+
+**Destroyed templates linger in the ContainerView.** Destroying a
+template leaves a stale MOR in the view (verified: one stale entry per
+destroyed template, never clearing; destroying a regular VM — on, off
+or suspended — leaves none), and any property read on it raises
+`ManagedObjectNotFound`, which broke `find_vm_by_name`, the batched
+leaf retrieve and `--inventory` after a teardown. `vcenter.safe_name`
+skips stale entries in name lookups, `retrieve_props_multi` falls back
+to per-object retrieves when the batched call hits one, and
+`summarize_lab` skips VMs missing from the leaf result. A real vCenter
+never serves stale entries, so all of this is a no-op there.
+
+**CBT, suspend and boot delay work; guest tools never report.** Probed
+live: `changeTrackingEnabled=true` is accepted in the create spec and
+in a later `ReconfigVM` and reads back via leaf retrieve; `bootDelay`
+is stored and served back the same way; `SuspendVM_Task` works on a
+powered-on VM, `suspended` reads back as the power state, and
+`PowerOnVM_Task` resumes a suspended VM. But `guest.toolsStatus` is
+always `toolsNotInstalled` and `guest.toolsRunningStatus` always
+`guestToolsNotRunning`, for powered-off, powered-on, suspended and
+template VMs alike — vcsim never simulates guest tools, and there is no
+setter API for it in vSphere at all. The lab therefore declares the
+expected tools status per VM and shows declared-vs-live instead of
+pretending to set it.
 
 **vAppConfig is fully served.** `vAppConfig` on a VM (`VmConfigSpec`
 with `ProductSpec`/`PropertySpec` entries, operation `add`) is accepted

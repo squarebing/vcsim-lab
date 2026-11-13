@@ -131,12 +131,17 @@ class ResolvedRefs:
     opaque: dict[str, tuple[str, str]] = field(default_factory=dict)  # logical -> (id, type)
 
 
-def build_create_spec(spec: VmSpec, plan: VmPlan, refs: ResolvedRefs) -> vim.vm.ConfigSpec:
+def build_create_spec(
+    spec: VmSpec, plan: VmPlan, refs: ResolvedRefs, cbt: bool = False
+) -> vim.vm.ConfigSpec:
     """Build the CreateVM_Task spec.
 
     Covers the core devices only (controllers, disks, NICs, CD-ROM).
     Boot order, TPM, GPU and video are applied afterwards by the builder
-    as separate reconfig tasks — see devices.py for why.
+    as separate reconfig tasks — see devices.py for why. `cbt` sets
+    changeTrackingEnabled (Changed Block Tracking, used by backup
+    products to read only changed blocks); vcsim accepts it in the
+    create spec and serves it back.
     """
     device_change: list[vim.vm.device.VirtualDeviceSpec] = []
 
@@ -193,6 +198,7 @@ def build_create_spec(spec: VmSpec, plan: VmPlan, refs: ResolvedRefs) -> vim.vm.
         cpuHotAddEnabled=spec.cpu_hot_add,
         memoryHotAddEnabled=spec.memory_hot_add,
         firmware=spec.firmware,
+        changeTrackingEnabled=cbt,
         annotation=spec.annotation or spec.os_label,
         files=files,
         deviceChange=device_change,

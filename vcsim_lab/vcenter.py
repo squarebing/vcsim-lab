@@ -120,12 +120,28 @@ def wait_for_task(si: "Vim.ServiceInstance", task: vim.Task, timeout_s: int = 30
 # ---------------------------------------------------------------------------
 
 
+def safe_name(obj) -> str | None:
+    """An object's name, or None if the object is gone.
+
+    vcsim's ContainerView keeps listing templates after they are
+    destroyed (observed v0.56.2: every destroyed template leaves one
+    stale MOR that never clears; destroying a regular VM does not),
+    and any property read on one raises ManagedObjectNotFound. Name
+    lookups must skip those entries instead of crashing — a real
+    vCenter never serves them, so this is a no-op there.
+    """
+    try:
+        return obj.name
+    except vmodl.fault.ManagedObjectNotFound:
+        return None
+
+
 def get_obj(content: vim.ServiceInstanceContent, vimtype, name: str):
     """Find a managed object of `vimtype` by name (first match)."""
     view = content.viewManager.CreateContainerView(content.rootFolder, [vimtype], True)
     try:
         for obj in view.view:
-            if obj.name == name:
+            if safe_name(obj) == name:
                 return obj
     finally:
         view.Destroy()
@@ -246,7 +262,11 @@ def retrieve_props(si: "Vim.ServiceInstance", obj, vimtype, paths: list[str]) ->
 def retrieve_props_multi(si: "Vim.ServiceInstance", objs, vimtype, paths: list[str]) -> dict:
     """Retrieve leaf properties for many objects in one call.
 
-    Returns {moId: {path: value}}."""
+    Returns {moId: {path: value}}. If any object in the set is gone
+    (vcsim serves stale ContainerView entries for destroyed templates),
+    the batched call fails with ManagedObjectNotFound — fall back to
+    per-object retrieves and silently drop the stale entries.
+    """
     if not objs:
         return {}
     content = si.RetrieveContent()
@@ -254,7 +274,16 @@ def retrieve_props_multi(si: "Vim.ServiceInstance", objs, vimtype, paths: list[s
     prop_spec = vmodl.query.PropertyCollector.PropertySpec(type=vimtype, pathSet=paths)
     filter_spec = vmodl.query.PropertyCollector.FilterSpec(objectSet=obj_specs, propSet=[prop_spec])
     result = {}
-    for obj_content in content.propertyCollector.RetrieveProperties(specSet=[filter_spec]) or []:
+    try:
+        retrieved = content.propertyCollector.RetrieveProperties(specSet=[filter_spec]) or []
+    except vmodl.fault.ManagedObjectNotFound:
+        for obj in objs:
+            try:
+                result[obj._moId] = retrieve_props(si, obj, vimtype, paths)
+            except vmodl.fault.ManagedObjectNotFound:
+                continue
+        return result
+    for obj_content in retrieved:
         result[obj_content.obj._moId] = {p.name: p.val for p in obj_content.propSet}
     return result
 

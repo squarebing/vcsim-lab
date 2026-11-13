@@ -7,6 +7,7 @@ planner can be unit-tested without a vCenter connection.
 from __future__ import annotations
 
 import os
+import random
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +38,21 @@ KNOWN_GPU_MODELS = {
 _VGPU_PROFILE_RE = re.compile(r"^(nvidia|grid)_[a-z0-9]+-\d+[cq]?$")
 VAPP_PROPERTY_TYPES = ("string", "ip", "password", "boolean", "number")
 BOOT_TOKENS = ("disk", "network", "cdrom", "floppy")
+
+# Per-VM attributes assigned randomly (seeded) or explicitly:
+#   cbt          Changed Block Tracking (ConfigSpec.changeTrackingEnabled)
+#   power_state  runtime power state (poweredOn / poweredOff / suspended)
+#   fast_boot    boot delay 0 ms (boot immediately) vs. the standard delay
+#   tools_status declared VMware Tools status (guest-reported; vcsim never
+#                reports tools, so this is a declared-vs-live comparison)
+POWER_STATES = ("poweredOn", "poweredOff", "suspended")
+TOOLS_STATUSES = ("toolsNotInstalled", "toolsNotRunning", "toolsOk", "toolsOld")
+RANDOM = "random"
+DEFAULT_RANDOM_SEED = 42
+# Boot delay in milliseconds: fast-boot VMs boot immediately, the rest
+# get a standard 3 s delay (enough to hit a key for the boot menu).
+FAST_BOOT_DELAY_MS = 0
+NORMAL_BOOT_DELAY_MS = 3000
 
 # Guest OS identifiers known to exist in vSphere 7/8. Anything else produces
 # a warning (vcsim accepts arbitrary strings; real vCenter does not).
@@ -169,6 +185,23 @@ class VmSpec:
     # powered on, so template=True requires power_on=False.
     template: bool = False
     power_on: bool = False
+    # Per-VM attributes, each an explicit value or "random" (resolved
+    # from lab.random_seed at build time — see resolve_random_assignments).
+    # cbt: Changed Block Tracking on/off.
+    cbt: bool | str = RANDOM
+    # power_state: poweredOn | poweredOff | suspended | "random" | None.
+    # None (the default) derives from power_on for backward compatibility;
+    # an explicit power_state wins over power_on. Templates ignore it and
+    # always stay poweredOff.
+    power_state: str | None = None
+    # fast_boot: boot delay 0 ms (boot immediately) vs. the standard
+    # 3 s delay. There is no native vSphere VM "fast boot" setting —
+    # bootDelay is the lab's representation of it (see README).
+    fast_boot: bool | str = RANDOM
+    # tools_status: the declared VMware Tools status. Guest-reported with
+    # no setter API; vcsim always reports toolsNotInstalled, so this is
+    # compared declared-vs-live rather than enforced (see README).
+    tools_status: str = RANDOM
     cpu_hot_add: bool = False
     memory_hot_add: bool = False
     disks: list[DiskSpec] = field(default_factory=list)
@@ -186,6 +219,33 @@ class NetworkSpec:
 
 
 @dataclass
+class ResolvedAssignment:
+    """A VM's per-VM attributes after "random" has been resolved.
+
+    Produced by resolve_random_assignments() from the lab seed: the same
+    vms.yaml + seed always yields the same assignment, so builds are
+    reproducible and verify can check the live lab against it.
+    """
+
+    cbt: bool
+    power_state: str  # poweredOn | poweredOff | suspended
+    fast_boot: bool
+    tools_status: str  # one of TOOLS_STATUSES
+
+    def expected_boot_delay_ms(self) -> int:
+        return FAST_BOOT_DELAY_MS if self.fast_boot else NORMAL_BOOT_DELAY_MS
+
+    def to_dict(self) -> dict:
+        return {
+            "cbt": self.cbt,
+            "power_state": self.power_state,
+            "fast_boot": self.fast_boot,
+            "tools_status": self.tools_status,
+            "boot_delay_ms": self.expected_boot_delay_ms(),
+        }
+
+
+@dataclass
 class LabConfig:
     datacenter: str
     cluster: str
@@ -194,6 +254,10 @@ class LabConfig:
     # vApp containers created under the cluster's root resource pool
     # (ResourcePool.CreateVApp). VMs name one via `vapp_container:`.
     vapps: list[str] = field(default_factory=list)
+    # Seed for the per-VM random attributes (cbt, power_state, fast_boot,
+    # tools_status). Each VM draws from its own RNG seeded with
+    # "<seed>:<vm-name>", so adding a VM never reshuffles the others.
+    random_seed: int = DEFAULT_RANDOM_SEED
     networks: dict[str, NetworkSpec] = field(default_factory=dict)
     vms: list[VmSpec] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -426,6 +490,31 @@ def _load_vm(raw: dict, warnings: list[str]) -> VmSpec:
     if template and raw.get("power_on"):
         raise ConfigError(f"{where}: template VMs cannot be powered on (power_on must be false)")
 
+    # Per-VM attributes: explicit value or "random" (resolved from the
+    # lab seed at build time). Templates are exempt from power-state
+    # assignment — they always stay poweredOff.
+    cbt = raw.get("cbt", RANDOM)
+    if cbt is not True and cbt is not False and cbt != RANDOM:
+        raise ConfigError(f"{where}: cbt must be true, false or 'random'")
+    power_state = raw.get("power_state")
+    if power_state is not None and power_state not in POWER_STATES and power_state != RANDOM:
+        raise ConfigError(
+            f"{where}: power_state must be one of {list(POWER_STATES)} or 'random'"
+        )
+    if template and power_state is not None:
+        raise ConfigError(
+            f"{where}: template VMs cannot take power_state {power_state!r} "
+            "(templates always stay poweredOff)"
+        )
+    fast_boot = raw.get("fast_boot", RANDOM)
+    if fast_boot is not True and fast_boot is not False and fast_boot != RANDOM:
+        raise ConfigError(f"{where}: fast_boot must be true, false or 'random'")
+    tools_status = raw.get("tools_status", RANDOM)
+    if tools_status not in TOOLS_STATUSES and tools_status != RANDOM:
+        raise ConfigError(
+            f"{where}: tools_status must be one of {list(TOOLS_STATUSES)} or 'random'"
+        )
+
     cpus = int(raw.get("cpus", 2))
     cores = int(raw.get("cores_per_socket", 1))
     if cpus <= 0 or cores <= 0 or cpus % cores != 0:
@@ -457,6 +546,10 @@ def _load_vm(raw: dict, warnings: list[str]) -> VmSpec:
         vapp=vapp,
         template=template,
         power_on=bool(raw.get("power_on", False)),
+        cbt=cbt,
+        power_state=power_state,
+        fast_boot=fast_boot,
+        tools_status=tools_status,
         cpu_hot_add=bool(raw.get("cpu_hot_add", False)),
         memory_hot_add=bool(raw.get("memory_hot_add", False)),
         disks=disks,
@@ -503,13 +596,62 @@ def load_lab(path: str | Path = "vms.yaml") -> LabConfig:
                 f"VM {vm.name!r}: vapp_container {vm.vapp_container!r} is not in lab.vapps:"
             )
 
+    seed = lab.get("random_seed", DEFAULT_RANDOM_SEED)
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise ConfigError(f"lab.random_seed must be an integer, got {seed!r}")
+
     return LabConfig(
         datacenter=_require(lab, "datacenter", "lab:"),
         cluster=_require(lab, "cluster", "lab:"),
         folders=list(lab.get("folders") or []),
         resource_pools=list(lab.get("resource_pools") or []),
         vapps=list(lab.get("vapps") or []),
+        random_seed=seed,
         networks=networks,
         vms=vms,
         warnings=warnings,
     )
+
+
+# ---------------------------------------------------------------------------
+# Seeded random assignment
+# ---------------------------------------------------------------------------
+
+
+def resolve_random_assignments(lab: LabConfig) -> dict[str, ResolvedAssignment]:
+    """Resolve every VM's per-VM attributes to concrete values.
+
+    Explicit values pass through unchanged. Fields set to "random" draw
+    from a per-VM RNG seeded with "<lab seed>:<vm name>", so the
+    assignment is deterministic for a given vms.yaml + seed, and adding
+    or removing a VM never reshuffles the others. Draws happen in a
+    fixed order (cbt, power_state, fast_boot, tools_status) and only for
+    fields actually set to "random".
+
+    Templates are exempt from power-state assignment: they always resolve
+    to poweredOff and consume no power-state draw. A VM with no
+    power_state derives it from the legacy power_on flag.
+    """
+    resolved = {}
+    for vm in lab.vms:
+        rng = random.Random(f"{lab.random_seed}:{vm.name}")
+        cbt = rng.choice([True, False]) if vm.cbt == RANDOM else bool(vm.cbt)
+        if vm.template:
+            power_state = "poweredOff"
+        elif vm.power_state == RANDOM:
+            power_state = rng.choice(POWER_STATES)
+        elif vm.power_state is not None:
+            power_state = vm.power_state
+        else:
+            power_state = "poweredOn" if vm.power_on else "poweredOff"
+        fast_boot = rng.choice([True, False]) if vm.fast_boot == RANDOM else bool(vm.fast_boot)
+        tools_status = (
+            rng.choice(TOOLS_STATUSES) if vm.tools_status == RANDOM else vm.tools_status
+        )
+        resolved[vm.name] = ResolvedAssignment(
+            cbt=cbt,
+            power_state=power_state,
+            fast_boot=fast_boot,
+            tools_status=tools_status,
+        )
+    return resolved

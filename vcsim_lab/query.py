@@ -6,6 +6,11 @@ NICs — using plain attribute access on the objects a ContainerView
 returns. For large inventories the same fields can be pulled through a
 PropertyCollector (see ``summarize_vm``'s notes), but for a lab of this
 size the direct read is clearer and fast enough.
+
+The per-VM attributes (CBT, power state, boot delay / fast boot, tools
+status) come from leaf property retrieves where the whole object cannot
+be deserialized against vcsim; ``summarize_lab`` accepts the resolved
+assignments so the summary can show declared-vs-live values.
 """
 
 from __future__ import annotations
@@ -15,7 +20,7 @@ import json
 from pyVmomi import vim
 
 from . import devices
-from .vcenter import connect, disconnect, list_objs, retrieve_props_multi
+from .vcenter import connect, disconnect, list_objs, retrieve_props_multi, safe_name
 
 
 # ---------------------------------------------------------------------------
@@ -103,13 +108,21 @@ def _nic_info(device) -> dict:
     }
 
 
-def summarize_vm(vm: vim.VirtualMachine, runtime: dict | None = None) -> dict:
+def summarize_vm(
+    vm: vim.VirtualMachine,
+    runtime: dict | None = None,
+    declared: dict | None = None,
+) -> dict:
     """Everything the lab tracks about one VM, as plain JSON-able data.
 
     ``runtime`` carries leaf properties fetched by ``summarize_lab``
-    (power state, host name) — ``vm.runtime`` / ``vm.summary`` as whole
-    objects cannot be deserialized against vcsim (see
-    ``vcenter.retrieve_props``), so they are never touched here.
+    (power state, host name, CBT flag, boot delay, tools status) —
+    ``vm.runtime`` / ``vm.summary`` as whole objects cannot be
+    deserialized against vcsim (see ``vcenter.retrieve_props``), so they
+    are never touched here. ``declared`` is the VM's resolved assignment
+    (from ``config.resolve_random_assignments``), used to show
+    declared-vs-live values — notably for tools status, which vcsim
+    never reports (see README).
     """
     runtime = runtime or {}
     config = vm.config
@@ -131,12 +144,26 @@ def summarize_vm(vm: vim.VirtualMachine, runtime: dict | None = None) -> dict:
         datastore_names[ds._moId] = ds.name
 
     boot = getattr(config, "bootOptions", None)
+    # CBT / boot delay: prefer the leaf retrieve, fall back to the
+    # direct config read (vm.config deserializes fine against vcsim).
+    cbt = runtime.get("cbt")
+    if cbt is None:
+        cbt = getattr(config, "changeTrackingEnabled", None)
+    boot_delay_ms = runtime.get("boot_delay_ms")
+    if boot_delay_ms is None and boot is not None:
+        boot_delay_ms = getattr(boot, "bootDelay", None)
     try:
         guest = vm.guest
-        tools_status, ip = guest.toolsStatus, guest.ipAddress
+        guest_tools_status, tools_running_status, ip = (
+            guest.toolsStatus,
+            guest.toolsRunningStatus,
+            guest.ipAddress,
+        )
     except Exception:
-        tools_status, ip = None, None
-    return {
+        guest_tools_status, tools_running_status, ip = None, None, None
+    tools_status = runtime.get("tools_status", guest_tools_status)
+    tools_running_status = runtime.get("tools_running_status", tools_running_status)
+    summary = {
         "name": vm.name,
         "path": config.files.vmPathName,
         "power": runtime.get("power"),
@@ -160,12 +187,23 @@ def summarize_vm(vm: vim.VirtualMachine, runtime: dict | None = None) -> dict:
         "video_ram_kb": video[0].videoRamSizeInKB if video else None,
         "cdrom": cdrom,
         "boot_order": devices.describe_boot_order(vm),
+        "boot_delay_ms": boot_delay_ms,
+        "fast_boot": boot_delay_ms == 0 if boot_delay_ms is not None else None,
+        "cbt": cbt,
         "controllers": sorted(set(controllers.values())),
         "disks": [_disk_info(d, datastore_names) for d in disks],
         "nics": [_nic_info(n) for n in nics],
         "tools_status": tools_status,
+        "tools_running_status": tools_running_status,
         "ip": ip,
     }
+    if declared is not None:
+        summary["declared"] = declared
+        # Tools status is the one attribute the builder cannot enforce
+        # (guest-reported, no setter API); flag a declared/live gap
+        # rather than silently showing one of them.
+        summary["tools_status_mismatch"] = tools_status != declared.get("tools_status")
+    return summary
 
 
 def iter_vms(si) -> list[vim.VirtualMachine]:
@@ -177,14 +215,38 @@ def iter_vms(si) -> list[vim.VirtualMachine]:
         view.Destroy()
 
 
-def summarize_lab(si, names: list[str] | None = None) -> list[dict]:
+def summarize_lab(si, names: list[str] | None = None, declared: dict | None = None) -> list[dict]:
+    """Summaries for every VM in the inventory.
+
+    ``declared`` maps VM name -> resolved assignment dict (from
+    ``config.resolve_random_assignments``); when given, each summary
+    carries its declared values plus a tools-status mismatch flag.
+    """
     vms = iter_vms(si)
-    # One batched leaf retrieve for every VM's power state and host, plus
-    # a host moId -> name map (host names come from the inventory list).
-    leaf = retrieve_props_multi(si, vms, vim.VirtualMachine, ["runtime.powerState", "runtime.host"])
+    # One batched leaf retrieve for every VM's power state, host, CBT
+    # flag, boot delay and tools status, plus a host moId -> name map
+    # (host names come from the inventory list).
+    leaf = retrieve_props_multi(
+        si,
+        vms,
+        vim.VirtualMachine,
+        [
+            "runtime.powerState",
+            "runtime.host",
+            "config.changeTrackingEnabled",
+            "config.bootOptions.bootDelay",
+            "guest.toolsStatus",
+            "guest.toolsRunningStatus",
+        ],
+    )
     host_names = {h._moId: h.name for h in list_objs(si.RetrieveContent(), vim.HostSystem)}
     summaries = []
     for vm in vms:
+        # A VM missing from the leaf result is a stale ContainerView
+        # entry (a destroyed template, still listed by vcsim) — skip it
+        # rather than crashing on its first property read.
+        if vm._moId not in leaf:
+            continue
         props = leaf.get(vm._moId, {})
         host = props.get("runtime.host")
         summaries.append(
@@ -193,7 +255,12 @@ def summarize_lab(si, names: list[str] | None = None) -> list[dict]:
                 runtime={
                     "power": props.get("runtime.powerState"),
                     "host": host_names.get(host._moId) if host is not None else None,
+                    "cbt": props.get("config.changeTrackingEnabled"),
+                    "boot_delay_ms": props.get("config.bootOptions.bootDelay"),
+                    "tools_status": props.get("guest.toolsStatus"),
+                    "tools_running_status": props.get("guest.toolsRunningStatus"),
                 },
+                declared=(declared or {}).get(vm.name),
             )
         )
     summaries.sort(key=lambda s: s["name"])
@@ -295,7 +362,10 @@ def list_inventory(si) -> dict:
         "dvportgroups": [n.name for n in list_objs(content, vim.DistributedVirtualPortgroup)],
         "resource_pools": [p.name for p in list_objs(content, vim.ResourcePool)],
         "vapps": [v.name for v in list_objs(content, vim.VirtualApp)],
-        "vms": [v.name for v in list_objs(content, vim.VirtualMachine)],
+        # VMs use safe_name: vcsim's ContainerView keeps listing
+        # destroyed templates, and reading .name on one raises
+        # ManagedObjectNotFound.
+        "vms": [n for n in (safe_name(v) for v in list_objs(content, vim.VirtualMachine)) if n],
     }
 
 
@@ -318,15 +388,25 @@ def print_table(summaries: list[dict]) -> None:
             props = ", ".join(f"{x['id']}={x['value']}" for x in s["vapp"]["properties"])
             print(f"  appliance: {p['name']} {p['version']} by {p['vendor']} ({props})")
         print(f"  hw {s['hardware_version']} tpm={s['tpm']} gpu={gpu} boot={' > '.join(s['boot_order']) or '(default)'}")
+        tools_line = f"tools={s['tools_status']}/{s['tools_running_status']}"
+        if s.get("tools_status_mismatch"):
+            tools_line += (
+                f" [declared {s['declared']['tools_status']} — "
+                "vcsim never reports guest tools]"
+            )
+        print(
+            f"  cbt={s['cbt']} fast_boot={s['fast_boot']} "
+            f"(bootDelay {s['boot_delay_ms']}ms) {tools_line}"
+        )
         print(f"  controllers: {', '.join(s['controllers'])}")
         print(f"  disks: {disks}")
         print(f"  nics: {nics}")
         print()
 
 
-def main_json(cfg, names=None) -> str:
+def main_json(cfg, names=None, declared=None) -> str:
     si = connect(cfg)
     try:
-        return json.dumps(summarize_lab(si, names), indent=2)
+        return json.dumps(summarize_lab(si, names, declared=declared), indent=2)
     finally:
         disconnect(si)

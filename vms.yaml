@@ -25,7 +25,24 @@
 #   `passthrough` with AMD PCI IDs instead of a vGPU profile.
 # - `template: true` marks the VM as a vSphere template (MarkAsTemplate) as
 #   the last build step, after all device extras — device reconfigs on a
-#   template are rejected. Templates cannot be powered on.
+#   template are rejected. Templates cannot be powered on and are exempt
+#   from power-state assignment (they always stay poweredOff).
+# - Per-VM attributes, each an explicit value or `random` (resolved from
+#   `lab.random_seed`, so the same seed always gives the same assignment):
+#     cbt:          true | false | random  — Changed Block Tracking
+#                   (changeTrackingEnabled, in the create spec).
+#     power_state:  poweredOn | poweredOff | suspended | random —
+#                   enforced after create (suspend = power on, then
+#                   SuspendVM_Task). Omit to derive from `power_on:`.
+#     fast_boot:    true | false | random  — boot delay 0 ms (boot
+#                   immediately) vs. the standard 3000 ms. There is no
+#                   native vSphere VM "fast boot" setting; bootDelay is
+#                   the lab's representation of it (see README).
+#     tools_status: toolsNotInstalled | toolsNotRunning | toolsOk |
+#                   toolsOld | random — the DECLARED VMware Tools status.
+#                   Tools status is guest-reported with no setter API
+#                   and vcsim always reports toolsNotInstalled, so this
+#                   is compared declared-vs-live, never enforced.
 # - `vapp_config:` sets OVF product info + environment properties on an
 #   appliance VM (vAppConfig, served back intact by vcsim). `vapp_container:`
 #   places the VM inside one of the vApp containers in `lab.vapps`.
@@ -37,6 +54,9 @@
 lab:
   datacenter: DC0
   cluster: DC0_C0
+  # Seed for the per-VM random attributes (cbt, power_state,
+  # fast_boot, tools_status). Same seed -> same assignment.
+  random_seed: 42
   # VM folders created under the datacenter's vm folder.
   folders:
     - lab-windows
@@ -89,7 +109,10 @@ vms:
     tpm: true
     folder: lab-windows
     resource_pool: lab-general
-    power_on: true
+    power_state: random
+    cbt: random
+    fast_boot: random
+    tools_status: random
     cpu_hot_add: true
     memory_hot_add: true
     disks:
@@ -112,7 +135,10 @@ vms:
     tpm: true
     folder: lab-windows
     resource_pool: lab-general
-    power_on: true
+    power_state: random
+    cbt: true
+    fast_boot: random
+    tools_status: random
     disks:
       - { size_gb: 100, controller: pvscsi, datastore: LocalDS_0, thin: true }
       - { size_gb: 500, controller: pvscsi, datastore: LocalDS_1, thin: false, eager: true }
@@ -137,7 +163,10 @@ vms:
     video_ram_kb: 131072
     folder: lab-windows
     resource_pool: lab-general
-    power_on: true
+    power_state: random
+    cbt: random
+    fast_boot: random
+    tools_status: random
     disks:
       - { size_gb: 80, controller: nvme, datastore: LocalDS_0, thin: true }
     nics:
@@ -167,7 +196,10 @@ vms:
       mmio_size_gb: 32
     folder: lab-gpu
     resource_pool: lab-gpu
-    power_on: false
+    power_state: random
+    cbt: random
+    fast_boot: random
+    tools_status: random
     disks:
       - { size_gb: 200, controller: nvme, datastore: LocalDS_0, thin: true }
     nics:
@@ -194,7 +226,10 @@ vms:
       label: "vGPU A100-40C"
     folder: lab-gpu
     resource_pool: lab-gpu
-    power_on: false
+    power_state: random
+    cbt: random
+    fast_boot: random
+    tools_status: random
     disks:
       - { size_gb: 100, controller: nvme, datastore: LocalDS_0, thin: true }
     nics:
@@ -223,7 +258,10 @@ vms:
       mmio_size_gb: 128
     folder: lab-gpu
     resource_pool: lab-gpu
-    power_on: false
+    power_state: random
+    cbt: random
+    fast_boot: random
+    tools_status: random
     disks:
       - { size_gb: 500, controller: nvme, datastore: LocalDS_1, thin: true }
     nics:
@@ -246,7 +284,10 @@ vms:
     tpm: false
     folder: lab-linux
     resource_pool: lab-general
-    power_on: true
+    power_state: poweredOn
+    cbt: random
+    fast_boot: true
+    tools_status: random
     disks:
       - { size_gb: 40, controller: lsi-sas, datastore: LocalDS_2, thin: true }
     nics:
@@ -267,7 +308,10 @@ vms:
     tpm: false
     folder: lab-linux
     resource_pool: lab-general
-    power_on: true
+    power_state: random
+    cbt: true
+    fast_boot: random
+    tools_status: random
     disks:
       - { size_gb: 80, controller: pvscsi, datastore: LocalDS_0, thin: true }
       - { size_gb: 500, controller: pvscsi, datastore: LocalDS_1, thin: false, eager: true }
@@ -290,7 +334,10 @@ vms:
     tpm: true
     folder: lab-linux
     resource_pool: lab-general
-    power_on: false
+    power_state: random
+    cbt: random
+    fast_boot: random
+    tools_status: random
     disks:
       - { size_gb: 150, controller: nvme, datastore: LocalDS_0, thin: true }
     nics:
@@ -311,7 +358,10 @@ vms:
     tpm: false
     folder: lab-linux
     resource_pool: lab-general
-    power_on: true
+    power_state: random
+    cbt: random
+    fast_boot: random
+    tools_status: random
     disks:
       - { size_gb: 60, controller: lsi-logic, datastore: LocalDS_2, thin: true }
       - { size_gb: 200, controller: lsi-sas, datastore: LocalDS_2, thin: true }
@@ -334,7 +384,10 @@ vms:
     tpm: false
     folder: lab-linux
     resource_pool: lab-general
-    power_on: false
+    power_state: poweredOff
+    cbt: random
+    fast_boot: false
+    tools_status: toolsOld
     disks:
       - { size_gb: 60, controller: lsi-logic, datastore: LocalDS_2, thin: false, eager: false }
     nics:
@@ -355,7 +408,10 @@ vms:
     tpm: false
     folder: lab-linux
     resource_pool: lab-general
-    power_on: true
+    power_state: random
+    cbt: random
+    fast_boot: random
+    tools_status: toolsOk
     cpu_hot_add: true
     memory_hot_add: true
     disks:
@@ -388,7 +444,10 @@ vms:
       mmio_size_gb: 80
     folder: lab-gpu
     resource_pool: lab-gpu
-    power_on: false
+    power_state: random
+    cbt: random
+    fast_boot: random
+    tools_status: random
     disks:
       - { size_gb: 500, controller: nvme, datastore: LocalDS_1, thin: true }
     nics:
@@ -415,7 +474,10 @@ vms:
       label: "vGPU H100-80C"
     folder: lab-gpu
     resource_pool: lab-gpu
-    power_on: false
+    power_state: random
+    cbt: random
+    fast_boot: random
+    tools_status: random
     disks:
       - { size_gb: 200, controller: nvme, datastore: LocalDS_0, thin: true }
     nics:
@@ -444,7 +506,10 @@ vms:
       mmio_size_gb: 64
     folder: lab-gpu
     resource_pool: lab-gpu
-    power_on: false
+    power_state: random
+    cbt: random
+    fast_boot: random
+    tools_status: random
     disks:
       - { size_gb: 500, controller: nvme, datastore: LocalDS_1, thin: true }
     nics:
@@ -479,7 +544,10 @@ vms:
       mmio_size_gb: 64
     folder: lab-gpu
     resource_pool: lab-gpu
-    power_on: false
+    power_state: random
+    cbt: random
+    fast_boot: random
+    tools_status: random
     disks:
       - { size_gb: 200, controller: nvme, datastore: LocalDS_0, thin: true }
     nics:
@@ -502,7 +570,9 @@ vms:
     folder: lab-templates
     resource_pool: lab-general
     template: true
-    power_on: false
+    cbt: random
+    fast_boot: random
+    tools_status: random
     disks:
       - { size_gb: 100, controller: nvme, datastore: LocalDS_0, thin: true }
     nics:
@@ -524,7 +594,9 @@ vms:
     folder: lab-templates
     resource_pool: lab-general
     template: true
-    power_on: false
+    cbt: random
+    fast_boot: random
+    tools_status: random
     disks:
       - { size_gb: 60, controller: nvme, datastore: LocalDS_0, thin: true }
     nics:
@@ -546,7 +618,9 @@ vms:
     folder: lab-templates
     resource_pool: lab-general
     template: true
-    power_on: false
+    cbt: random
+    fast_boot: random
+    tools_status: random
     disks:
       - { size_gb: 60, controller: nvme, datastore: LocalDS_0, thin: true }
     nics:
@@ -568,7 +642,10 @@ vms:
     tpm: false
     folder: lab-appliances
     vapp_container: lab-appliances
-    power_on: true
+    power_state: poweredOn
+    cbt: false
+    fast_boot: random
+    tools_status: random
     disks:
       - { size_gb: 40, controller: lsi-sas, datastore: LocalDS_2, thin: true }
     nics:
@@ -600,7 +677,10 @@ vms:
     tpm: false
     folder: lab-appliances
     vapp_container: lab-appliances
-    power_on: true
+    power_state: poweredOn
+    cbt: true
+    fast_boot: random
+    tools_status: random
     disks:
       - { size_gb: 40, controller: nvme, datastore: LocalDS_0, thin: true }
       - { size_gb: 200, controller: nvme, datastore: LocalDS_1, thin: true }
