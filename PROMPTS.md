@@ -92,4 +92,7 @@ the free-plan spin-down caveat. Image build itself needs the first
 Actions run (no Docker daemon in the sandbox). Note: the GitHub connector
 cannot create workflow files (403 — the App token lacks the Workflows
 permission), so `.github/workflows/docker-publish.yml` was added via the
-GitHub web UI instead of the snapshot push.
+GitHub web UI instead of the snapshot push. Fixed 2026-11-13 14:12: the
+workflow failed at parse time because GitHub does not allow the `secrets`
+context in `if` conditionals ("Unrecognized named-value: 'secrets'") —
+the Render-hook check now happens in shell instead of a step `if`.
