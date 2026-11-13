@@ -1,0 +1,94 @@
+# Build the vcsim-lab image, push it to Docker Hub, and trigger a Render
+# deploy — on every push to main (or manually via workflow_dispatch).
+#
+# Required repository secrets (GitHub -> repo -> Settings -> Secrets and
+# variables -> Actions):
+#   DOCKERHUB_USERNAME  Docker Hub username (binghuspectrocloud)
+#   DOCKERHUB_TOKEN     Docker Hub access token (Docker Hub -> Account
+#                       Settings -> Personal Access Tokens)
+# Optional:
+#   RENDER_DEPLOY_HOOK  Render deploy hook URL for the vcsim-lab service
+#                       (Render Dashboard -> service -> Settings -> Deploy
+#                       Hook). When unset, the image is still published and
+#                       the Render step is skipped with a notice.
+#
+# The image is tagged :latest and :<commit-sha>. Render pulls :latest when
+# the deploy hook fires. See README "CI/CD pipeline" for the full setup.
+name: Build and publish Docker image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    name: Build, push to Docker Hub, deploy to Render
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write # for the build cache (type=gha)
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Check Docker Hub secrets
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DH_USER" ] || [ -z "$DH_TOKEN" ]; then
+            {
+              echo "## Docker Hub secrets missing"
+              echo ""
+              echo "This workflow cannot publish without two repository secrets:"
+              echo ""
+              echo "- \`DOCKERHUB_USERNAME\` — your Docker Hub username"
+              echo "- \`DOCKERHUB_TOKEN\` — a Docker Hub access token (Docker Hub -> Account Settings -> Personal Access Tokens)"
+              echo ""
+              echo "Add them under GitHub -> repo -> Settings -> Secrets and variables -> Actions, then re-run this workflow."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::DOCKERHUB_USERNAME and/or DOCKERHUB_TOKEN secrets are not set. See the job summary for setup instructions."
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            binghuspectrocloud/vcsim-lab:latest
+            binghuspectrocloud/vcsim-lab:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trigger Render deploy
+        if: ${{ secrets.RENDER_DEPLOY_HOOK != '' }}
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          curl -fsS -X POST "$RENDER_DEPLOY_HOOK"
+          echo "Render deploy triggered."
+
+      - name: Render deploy hook not configured
+        if: ${{ secrets.RENDER_DEPLOY_HOOK == '' }}
+        run: |
+          {
+            echo "## Render deploy skipped"
+            echo ""
+            echo "The image was pushed to Docker Hub, but no Render deploy was triggered: \`RENDER_DEPLOY_HOOK\` is not set as a repository secret."
+            echo ""
+            echo "To wire it up: Render Dashboard -> your vcsim-lab service -> Settings -> Deploy Hook -> copy the URL, then add it as the \`RENDER_DEPLOY_HOOK\` secret under GitHub -> repo -> Settings -> Secrets and variables -> Actions."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::RENDER_DEPLOY_HOOK is not set — skipping the Render deploy step."
