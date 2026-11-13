@@ -50,6 +50,7 @@ vms.yaml                 the lab: 12 VMs, folders, pools, networks (single sourc
 docker-compose.yml       vcsim container (vmware/vcsim:v0.56.2)
 requirements.txt         pyvmomi>=8.0, pyyaml>=6.0
 .env.example             VC_HOST/PORT/USER/PASSWORD, VC_INSECURE, VCSIM_VERSION
+PROMPTS.md               log of the prompts that built this project
 
 vcsim_lab/
   config.py              YAML -> dataclasses + validation (guest IDs, hex PCI IDs)
