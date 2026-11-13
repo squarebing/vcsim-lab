@@ -3,7 +3,7 @@
 #
 # Required repository secrets (GitHub -> repo -> Settings -> Secrets and
 # variables -> Actions):
-#   DOCKERHUB_USERNAME  Docker Hub username (binghuspectrocloud)
+#   DOCKERHUB_USERNAME  Docker Hub username (squarebing)
 #   DOCKERHUB_TOKEN     Docker Hub access token (Docker Hub -> Account
 #                       Settings -> Personal Access Tokens)
 # Optional:
@@ -68,8 +68,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            binghuspectrocloud/vcsim-lab:latest
-            binghuspectrocloud/vcsim-lab:${{ github.sha }}
+            squarebing/vcsim-lab:latest
+            squarebing/vcsim-lab:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
