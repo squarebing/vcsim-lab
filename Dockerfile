@@ -6,7 +6,9 @@
 #
 # Build:  docker build -t vcsim-lab .
 # Run:    docker run -p 8989:8989 vcsim-lab
-#         (SDK endpoint https://localhost:8989/sdk, user/pass by default)
+#         (SDK endpoint http://localhost:8989/sdk, user/pass by default;
+#         the container serves plain HTTP — Render terminates TLS at its
+#         edge and forwards HTTP, so vcsim must not serve HTTPS here)
 # The entrypoint starts vcsim, builds the 12-VM lab, then keeps vcsim
 # in the foreground. Render sets $PORT; locally it defaults to 8989.
 FROM python:3.12-slim

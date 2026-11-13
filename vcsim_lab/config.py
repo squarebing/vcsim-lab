@@ -153,20 +153,28 @@ class VCenterConfig:
     user: str = "user"
     password: str = "pass"
     insecure: bool = True  # vcsim uses a self-signed cert
+    # https by default (vcsim serves TLS); http when vcsim runs with
+    # -tls=false — the container on Render, where TLS is terminated
+    # at the edge and plain HTTP is forwarded to the container.
+    scheme: str = "https"
 
     @classmethod
     def from_env(cls) -> "VCenterConfig":
+        scheme = os.environ.get("VC_SCHEME", "https").lower()
+        if scheme not in ("http", "https"):
+            raise ConfigError(f"VC_SCHEME must be 'http' or 'https', got {scheme!r}")
         return cls(
             host=os.environ.get("VC_HOST", "127.0.0.1"),
             port=int(os.environ.get("VC_PORT", "8989")),
             user=os.environ.get("VC_USER", "user"),
             password=os.environ.get("VC_PASSWORD", "pass"),
             insecure=os.environ.get("VC_INSECURE", "1") not in ("0", "false", "False"),
+            scheme=scheme,
         )
 
     @property
     def url(self) -> str:
-        return f"https://{self.user}@{self.host}:{self.port}/sdk"
+        return f"{self.scheme}://{self.user}@{self.host}:{self.port}/sdk"
 
 
 # ---------------------------------------------------------------------------

@@ -37,8 +37,14 @@ trap 'exit 130' INT
 
 (
   cd "$WORK_DIR" || exit 1
+  # -tls=false: Render terminates TLS at its edge and forwards plain
+  # HTTP to the container, so vcsim must serve plain HTTP here — a
+  # TLS-serving vcsim answers Render's forwarded requests with
+  # "client sent an HTTP request to an HTTPS server". Local runs
+  # (docker-compose, start-vcsim-binary.sh) keep the TLS default.
   exec vcsim \
     -l "0.0.0.0:${PORT}" \
+    -tls=false \
     -api-version 8.0.3 \
     -dc 1 -cluster 1 -host 3 -standalone-host 1 \
     -ds 3 -pod 1 -pg 2 -nsx 1 -pool 1 -vm 0 \
@@ -49,15 +55,15 @@ VCSIM_PID=$!
 echo "vcsim starting (pid $VCSIM_PID) on 0.0.0.0:${PORT} ..."
 
 # Wait until the SDK endpoint answers (up to 60s); fail fast if vcsim
-# dies in the meantime. Any HTTP response counts — the endpoint is
-# HTTPS with a self-signed cert, hence -k.
+# dies in the meantime. Any HTTP response counts. vcsim serves plain
+# HTTP here (-tls=false), so the probe is plain http:// with no -k.
 READY=0
 for i in $(seq 1 60); do
   if ! kill -0 "$VCSIM_PID" 2>/dev/null; then
     echo "vcsim exited before becoming ready" >&2
     exit 1
   fi
-  if curl -k -s -o /dev/null "https://127.0.0.1:${PORT}/"; then
+  if curl -s -o /dev/null "http://127.0.0.1:${PORT}/"; then
     READY=1
     break
   fi
@@ -69,8 +75,9 @@ if [ "$READY" -ne 1 ]; then
 fi
 echo "vcsim is up; building the lab ..."
 
-# The builder connects over the same credentials vcsim was started with.
-VC_HOST=127.0.0.1 VC_PORT="$PORT" \
+# The builder connects over the same credentials vcsim was started with,
+# and over plain HTTP (VC_SCHEME=http) to match -tls=false.
+VC_HOST=127.0.0.1 VC_PORT="$PORT" VC_SCHEME=http \
   VC_USER="$VCSIM_USERNAME" VC_PASSWORD="$VCSIM_PASSWORD" VC_INSECURE=1 \
   python scripts/build_lab.py
 

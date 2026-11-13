@@ -346,8 +346,17 @@ then keeps vcsim in the foreground. Run it locally the same way:
 
 ```bash
 docker build -t vcsim-lab .
-docker run -p 8989:8989 vcsim-lab   # SDK: https://localhost:8989/sdk
+docker run -p 8989:8989 vcsim-lab   # SDK: http://localhost:8989/sdk
 ```
+
+The container serves **plain HTTP**, not HTTPS: vcsim runs with
+`-tls=false`, and the builder connects with `VC_SCHEME=http`. That is
+required on Render, which terminates TLS at its edge and forwards plain
+HTTP to the container — a TLS-serving vcsim answers Render's forwarded
+requests with "client sent an HTTP request to an HTTPS server". Public
+clients still reach the sim over HTTPS at
+`https://<service>.onrender.com/sdk`; local runs (`docker-compose`,
+`tools/start-vcsim-binary.sh`) keep serving HTTPS as before.
 
 ### One-time setup
 

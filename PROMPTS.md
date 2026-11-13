@@ -96,3 +96,17 @@ GitHub web UI instead of the snapshot push. Fixed 2026-11-13 14:12: the
 workflow failed at parse time because GitHub does not allow the `secrets`
 context in `if` conditionals ("Unrecognized named-value: 'secrets'") —
 the Render-hook check now happens in shell instead of a step `if`.
+
+## 10. 2026-11-13 14:30 — Render URL gives HTTP-to-HTTPS error
+
+> when check Render URL:  http://vcsim-lab.onrender.com/ or https://vcsim-lab.onrender.com/, I received client sent an http request to an https server issue.
+
+Outcome: Render terminates TLS at its edge and forwards plain HTTP to
+the container, but vcsim serves HTTPS by default, so its Go server
+rejected the forwarded requests. Fixed by serving plain HTTP in the
+container: vcsim runs with `-tls=false` (flag verified in v0.56.2:
+"Enable TLS (default true)"), the entrypoint probes `http://` and
+passes `VC_SCHEME=http` to the builder, and `VCenterConfig` gained a
+`scheme` field read from `VC_SCHEME` (default `https`, so local runs
+are unchanged). Public clients still reach the sim over HTTPS at the
+Render URL. Added `tests/test_config.py` (4 tests).
