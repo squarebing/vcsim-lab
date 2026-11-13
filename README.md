@@ -53,6 +53,11 @@ requirements.txt         pyvmomi>=8.0, pyyaml>=6.0
 .env.example             VC_HOST/PORT/USER/PASSWORD, VC_INSECURE, VCSIM_VERSION
 PROMPTS.md               log of the prompts that built this project
 storage.yaml             host storage model: arrays, LUNs, fabric HBAs, LUN -> datastore
+Dockerfile               vcsim + lab image (python:3.12-slim, vcsim binary)
+docker-entrypoint.sh     start vcsim, build the lab, stay in foreground
+render.yaml              Render Blueprint: web service from the Docker Hub image
+.dockerignore            keep bin/, model/, caches out of the image
+.github/workflows/docker-publish.yml   push to main -> build -> Docker Hub -> Render
 
 vcsim_lab/
   config.py              YAML -> dataclasses + validation (guest IDs, hex PCI IDs)
@@ -319,3 +324,61 @@ Notes: a vTPM needs a Key Provider; GPU passthrough needs a host with
 the requested PCI device (or the build reports the fallback); Secure
 Boot and video 3D are honoured for real, so `verify.py`'s warnings
 should clear.
+
+## CI/CD pipeline
+
+Every push to `main` rebuilds the container image and redeploys it:
+
+```
+push to main
+  -> GitHub Actions (.github/workflows/docker-publish.yml)
+  -> docker build + push binghuspectrocloud/vcsim-lab:latest (and :<sha>)
+  -> POST the Render deploy hook
+  -> Render pulls :latest and runs it
+```
+
+The image (`Dockerfile`, base `python:3.12-slim`) contains the vcsim
+binary plus the lab code. On start, `docker-entrypoint.sh` launches
+vcsim with the same inventory flags as `docker-compose.yml` on
+`0.0.0.0:${PORT:-8989}` (Render injects `$PORT`), waits for the SDK
+endpoint to answer, runs `scripts/build_lab.py` so the 12 VMs exist,
+then keeps vcsim in the foreground. Run it locally the same way:
+
+```bash
+docker build -t vcsim-lab .
+docker run -p 8989:8989 vcsim-lab   # SDK: https://localhost:8989/sdk
+```
+
+### One-time setup
+
+1. **Docker Hub secrets** — in the GitHub repo, Settings -> Secrets and
+   variables -> Actions, add:
+   - `DOCKERHUB_USERNAME` — `binghuspectrocloud`
+   - `DOCKERHUB_TOKEN` — a Docker Hub access token (Docker Hub ->
+     Account Settings -> Personal Access Tokens). Without these the
+     workflow fails loudly with setup instructions; it never silently
+     skips the publish.
+2. **Render service** — push once so Actions publishes the image, then
+   in the Render Dashboard: New -> Blueprint -> connect
+   `squarebing/vcsim-lab`. Render reads `render.yaml` (free plan, web
+   service from the prebuilt image) and prompts for `VCSIM_USERNAME`
+   and `VCSIM_PASSWORD`. Set strong credentials — the service is
+   public, and the defaults are `user` / `pass`.
+3. **Deploy hook** — in the Render service, Settings -> Deploy Hook,
+   copy the URL and add it as the `RENDER_DEPLOY_HOOK` GitHub repo
+   secret. Until then the workflow still publishes the image and skips
+   the Render step with a notice. (Deploys come only from the hook:
+   `autoDeploy` is off in `render.yaml`, so a repo push can't race the
+   image publish.)
+
+### Free-plan caveats
+
+- Free web services **spin down after 15 minutes without traffic**
+  and take about a minute to wake on the next request. The simulator
+  is in-memory, so every wake rebuilds the lab from scratch (the
+  entrypoint runs `build_lab.py` on each start) — anything created
+  interactively in the sim is lost on spin-down.
+- Free instances are capped at 750 instance-hours per workspace per
+  month, so one always-on service nearly exhausts the budget.
+- There is no health-check endpoint: Render's default port check is
+  what marks the service live, and vcsim listens as soon as it starts.

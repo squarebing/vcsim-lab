@@ -74,3 +74,22 @@ LocalDS_0/1/2, fabric HBAs per host), `vcsim_lab/storage.py` (model
 validation + live reconciliation), `scripts/query_storage.py` (per-host
 table / `--json`), and `tests/test_storage.py` (23 offline tests; 43
 total). README documents what vcsim serves vs. what is declared.
+
+## 9. 2026-11-13 13:37 — CI/CD pipeline: Docker Hub + Render
+
+> can you setup the pipeline so that, once new code is pushed, the docker image is updated and pushed to docker hub, and render.com is connected to the new docker image and make it running
+
+Outcome: CI/CD pipeline. Added `Dockerfile` (python:3.12-slim + vcsim
+binary from the govmomi release) and `docker-entrypoint.sh` (start
+vcsim on 0.0.0.0:$PORT with the lab's flags, build the 12 VMs, keep
+vcsim in the foreground), `.dockerignore`, `.github/workflows/docker-publish.yml`
+(push to main -> build -> push binghuspectrocloud/vcsim-lab:latest and
+:<sha> to Docker Hub -> POST the Render deploy hook), and `render.yaml`
+(Blueprint: free web service, runtime image). Docker Hub secrets fail
+loudly when unset; the Render step skips with a notice until
+RENDER_DEPLOY_HOOK is set. README documents the flow, the secrets, and
+the free-plan spin-down caveat. Image build itself needs the first
+Actions run (no Docker daemon in the sandbox). Note: the GitHub connector
+cannot create workflow files (403 — the App token lacks the Workflows
+permission), so `.github/workflows/docker-publish.yml` was added via the
+GitHub web UI instead of the snapshot push.

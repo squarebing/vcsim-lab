@@ -1,0 +1,12 @@
+# Keep vcsim runtime artifacts, local config and caches out of the image
+# (mirrors .gitignore, plus the CI workflow itself — not needed at runtime).
+bin/
+model/
+DC0-LocalDS_*/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.github/
+*.zip

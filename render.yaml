@@ -1,0 +1,27 @@
+# Render Blueprint: run vcsim-lab as a web service from the prebuilt
+# Docker image published by .github/workflows/docker-publish.yml.
+#
+# One-time setup (see README "CI/CD pipeline"):
+#   1. Push to main so Actions publishes binghuspectrocloud/vcsim-lab:latest.
+#   2. Render Dashboard -> New -> Blueprint -> connect squarebing/vcsim-lab.
+#      Render prompts for VCSIM_USERNAME / VCSIM_PASSWORD (sync: false).
+#   3. Copy the service's Deploy Hook URL into the RENDER_DEPLOY_HOOK
+#      GitHub repo secret so later pushes redeploy automatically.
+#
+# No credentials live in this file: the two env vars are sync: false, so
+# their values are set in the Render dashboard only.
+services:
+  - type: web
+    name: vcsim-lab
+    runtime: image
+    plan: free
+    # Deploys come only from the GitHub Actions deploy hook, never from
+    # repo pushes (a push would otherwise race the image publish).
+    autoDeploy: false
+    image:
+      url: docker.io/binghuspectrocloud/vcsim-lab:latest
+    envVars:
+      - key: VCSIM_USERNAME
+        sync: false
+      - key: VCSIM_PASSWORD
+        sync: false
