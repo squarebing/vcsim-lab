@@ -203,7 +203,7 @@ class TestSpecBuilding(unittest.TestCase):
 class TestLabMatrix(unittest.TestCase):
     def test_lab_distribution_covers_all_values(self):
         lab = config.load_lab(LAB)
-        self.assertEqual(len(lab.vms), 21)
+        self.assertEqual(len(lab.vms), 22)
         assigned = config.resolve_random_assignments(lab)
         self.assertEqual(set(a.power_state for a in assigned.values()), set(config.POWER_STATES))
         self.assertEqual({a.cbt for a in assigned.values()}, {True, False})

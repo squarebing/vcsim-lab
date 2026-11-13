@@ -39,6 +39,21 @@ _VGPU_PROFILE_RE = re.compile(r"^(nvidia|grid)_[a-z0-9]+-\d+[cq]?$")
 VAPP_PROPERTY_TYPES = ("string", "ip", "password", "boolean", "number")
 BOOT_TOKENS = ("disk", "network", "cdrom", "floppy")
 
+# Basic vs. dynamic disks — the Windows Disk Management distinction.
+# There is NO vSphere API property for it: a VMDK is the same either
+# way; basic/dynamic is guest-OS configuration (Disk Management /
+# diskpart on Windows). The lab therefore declares it per disk and
+# stamps the layout into the VM's extraConfig (lab.diskLayout) so it
+# is visible in the inventory; query/verify report it as declared,
+# not as a live vCenter property. Dynamic disks are Windows-only.
+DISK_TYPES = ("basic", "dynamic")
+# Volume kinds for dynamic disks (Windows Disk Management):
+#   simple   one disk, one volume
+#   spanned  one volume across 2+ disks, filled in order
+#   striped  one volume across 2+ disks, data striped (RAID 0)
+#   mirrored one volume across 2+ disks, data duplicated (RAID 1)
+VOLUME_KINDS = ("simple", "spanned", "striped", "mirrored")
+
 # Per-VM attributes assigned randomly (seeded) or explicitly:
 #   cbt          Changed Block Tracking (ConfigSpec.changeTrackingEnabled)
 #   power_state  runtime power state (poweredOn / poweredOff / suspended)
@@ -103,6 +118,27 @@ class DiskSpec:
     thin: bool = True
     eager: bool = False  # only meaningful when thin is False (thick eager-zeroed)
     disk_mode: str = "persistent"
+    # basic | dynamic — the Windows Disk Management distinction.
+    # Declared-only: vSphere has no API property for it (see
+    # DISK_TYPES). Dynamic disks are Windows-only (validated).
+    disk_type: str = "basic"
+
+
+@dataclass
+class VolumeSpec:
+    """A Windows dynamic-disk volume: one volume spanning 1+ disks.
+
+    ``disks`` are 1-based disk indexes into the VM's disks list
+    (matching the "Hard disk N" labels and the boot tokens disk:2).
+    Every disk in a volume must be dynamic; spanned/striped/mirrored
+    volumes need 2+ disks, a simple volume exactly one. Declared-only,
+    like disk_type — on a real Windows VM the volume would be created
+    in Disk Management / diskpart.
+    """
+
+    name: str
+    kind: str  # simple | spanned | striped | mirrored
+    disks: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -205,6 +241,9 @@ class VmSpec:
     cpu_hot_add: bool = False
     memory_hot_add: bool = False
     disks: list[DiskSpec] = field(default_factory=list)
+    # Dynamic-disk volumes (Windows only, declared-only — see
+    # VolumeSpec). A VM with no dynamic disks has no volumes.
+    volumes: list[VolumeSpec] = field(default_factory=list)
     nics: list[NicSpec] = field(default_factory=list)
     cdrom: CdromSpec | None = None
     boot_order: list[str] = field(default_factory=lambda: ["disk"])
@@ -326,6 +365,13 @@ def to_signed_short(value: int) -> int:
     return value - 0x10000 if value > 0x7FFF else value
 
 
+def is_windows_guest(guest_id: str) -> bool:
+    """True for Windows guest OS identifiers (windows11_64Guest,
+    windows2019srv_64Guest, ...). Dynamic disks are a Windows-only
+    concept, so this gates the disk_type validation."""
+    return guest_id.startswith("windows")
+
+
 def _require(mapping: dict, key: str, where: str):
     if key not in mapping or mapping[key] is None:
         raise ConfigError(f"missing required key {key!r} in {where}")
@@ -443,6 +489,14 @@ def _load_vm(raw: dict, warnings: list[str]) -> VmSpec:
     for i, d in enumerate(raw.get("disks") or []):
         if d.get("controller", "pvscsi") not in CONTROLLER_TYPES:
             raise ConfigError(f"{where}: disk {i} controller must be one of {CONTROLLER_TYPES}")
+        disk_type = d.get("disk_type", "basic")
+        if disk_type not in DISK_TYPES:
+            raise ConfigError(f"{where}: disk {i} disk_type must be one of {DISK_TYPES}")
+        if disk_type == "dynamic" and not is_windows_guest(guest_id):
+            raise ConfigError(
+                f"{where}: disk {i} is dynamic, but dynamic disks are a "
+                f"Windows-only concept (guest {guest_id!r} is not Windows)"
+            )
         disks.append(
             DiskSpec(
                 size_gb=int(_require(d, "size_gb", f"{where} disk {i}")),
@@ -451,10 +505,52 @@ def _load_vm(raw: dict, warnings: list[str]) -> VmSpec:
                 thin=bool(d.get("thin", True)),
                 eager=bool(d.get("eager", False)),
                 disk_mode=d.get("disk_mode", "persistent"),
+                disk_type=disk_type,
             )
         )
     if not disks:
         raise ConfigError(f"{where}: at least one disk is required")
+
+    # Dynamic-disk volumes: each volume names its disks by 1-based index
+    # into the disks list; every disk in a volume must be dynamic.
+    volumes = []
+    seen_volumes = set()
+    claimed_disks: dict[int, str] = {}
+    for i, vol in enumerate(raw.get("volumes") or []):
+        vwhere = f"{where} volume {i}"
+        vname = _require(vol, "name", vwhere)
+        if vname in seen_volumes:
+            raise ConfigError(f"{where}: duplicate volume name {vname!r}")
+        seen_volumes.add(vname)
+        kind = _require(vol, "kind", vwhere)
+        if kind not in VOLUME_KINDS:
+            raise ConfigError(f"{vwhere}: kind must be one of {VOLUME_KINDS}")
+        members = vol.get("disks") or []
+        if not members:
+            raise ConfigError(f"{vwhere}: at least one disk is required")
+        if len(members) != len(set(members)):
+            raise ConfigError(f"{vwhere}: duplicate disk index in {members}")
+        if kind == "simple" and len(members) != 1:
+            raise ConfigError(f"{vwhere}: a simple volume spans exactly one disk")
+        if kind in ("spanned", "striped", "mirrored") and len(members) < 2:
+            raise ConfigError(f"{vwhere}: a {kind} volume needs 2+ disks, got {len(members)}")
+        for idx in members:
+            if not isinstance(idx, int) or isinstance(idx, bool) or idx < 1 or idx > len(disks):
+                raise ConfigError(
+                    f"{vwhere}: disk index {idx!r} is out of range "
+                    f"(VM has {len(disks)} disk(s), indexes are 1-based)"
+                )
+            if disks[idx - 1].disk_type != "dynamic":
+                raise ConfigError(
+                    f"{vwhere}: disk {idx} is not dynamic — every disk in a "
+                    "volume must have disk_type: dynamic"
+                )
+            if idx in claimed_disks:
+                raise ConfigError(
+                    f"{vwhere}: disk {idx} is already in volume {claimed_disks[idx]!r}"
+                )
+            claimed_disks[idx] = vname
+        volumes.append(VolumeSpec(name=vname, kind=kind, disks=list(members)))
 
     nics = []
     for i, n in enumerate(raw.get("nics") or []):
@@ -553,6 +649,7 @@ def _load_vm(raw: dict, warnings: list[str]) -> VmSpec:
         cpu_hot_add=bool(raw.get("cpu_hot_add", False)),
         memory_hot_add=bool(raw.get("memory_hot_add", False)),
         disks=disks,
+        volumes=volumes,
         nics=nics,
         cdrom=cdrom,
         boot_order=list(boot_order),
@@ -655,3 +752,71 @@ def resolve_random_assignments(lab: LabConfig) -> dict[str, ResolvedAssignment]:
             tools_status=tools_status,
         )
     return resolved
+
+
+# ---------------------------------------------------------------------------
+# Disk layout (basic/dynamic disks, declared-only)
+# ---------------------------------------------------------------------------
+
+# extraConfig key carrying the declared disk layout on VMs with dynamic
+# disks, so the layout is visible in the inventory (vcsim serves
+# extraConfig back intact). Basic-only VMs carry no key: basic is the
+# default and needs no marker.
+DISK_LAYOUT_EXTRA_CONFIG_KEY = "lab.diskLayout"
+
+
+def disk_layout_summary(vm: VmSpec) -> dict:
+    """The VM's declared disk layout as plain JSON-able data.
+
+    Per disk: its 1-based index, basic/dynamic type, and the volume it
+    belongs to (if any) with that volume's kind. Plus the volume list
+    itself and a has_dynamic flag. Used by the query tool to show the
+    declared layout alongside the live disks.
+    """
+    volume_of: dict[int, VolumeSpec] = {}
+    for volume in vm.volumes:
+        for idx in volume.disks:
+            volume_of[idx] = volume
+    disks = []
+    for i, disk in enumerate(vm.disks, start=1):
+        volume = volume_of.get(i)
+        disks.append(
+            {
+                "index": i,
+                "disk_type": disk.disk_type,
+                "volume": volume.name if volume else None,
+                "volume_kind": volume.kind if volume else None,
+            }
+        )
+    return {
+        "disks": disks,
+        "volumes": [
+            {"name": v.name, "kind": v.kind, "disks": list(v.disks)} for v in vm.volumes
+        ],
+        "has_dynamic": any(d.disk_type == "dynamic" for d in vm.disks),
+    }
+
+
+def disk_layout_extra_config(vm: VmSpec) -> str | None:
+    """The compact disk-layout string stamped into extraConfig, or None
+    for VMs with no dynamic disks (basic is the default; no marker
+    needed). One entry per disk, in disk order, separated by "; ":
+
+        basic; dynamic:SQLData:mirrored; dynamic:SQLData:mirrored
+
+    A dynamic disk in no volume is just "dynamic". The builder writes
+    this under DISK_LAYOUT_EXTRA_CONFIG_KEY at create time; verify
+    checks the live value against it.
+    """
+    summary = disk_layout_summary(vm)
+    if not summary["has_dynamic"]:
+        return None
+    parts = []
+    for entry in summary["disks"]:
+        if entry["disk_type"] == "basic":
+            parts.append("basic")
+        elif entry["volume"] is not None:
+            parts.append(f"dynamic:{entry['volume']}:{entry['volume_kind']}")
+        else:
+            parts.append("dynamic")
+    return "; ".join(parts)

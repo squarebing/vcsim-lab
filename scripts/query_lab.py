@@ -29,13 +29,21 @@ from vcsim_lab.vcenter import connect, disconnect  # noqa: E402
 
 def _load_declared(path: str) -> dict | None:
     """Resolve the lab's per-VM assignments (name -> dict), or None if
-    the lab file cannot be loaded — querying stays live-only then."""
+    the lab file cannot be loaded — querying stays live-only then.
+    Each entry carries the seed-resolved attributes plus the declared
+    disk layout (basic/dynamic types and volumes)."""
     try:
         lab = config.load_lab(path)
     except (config.ConfigError, OSError) as exc:
         print(f"note: could not load {path} ({exc}); showing live values only", file=sys.stderr)
         return None
-    return {name: a.to_dict() for name, a in config.resolve_random_assignments(lab).items()}
+    assigned = config.resolve_random_assignments(lab)
+    declared = {}
+    for vm in lab.vms:
+        entry = assigned[vm.name].to_dict()
+        entry["disk_layout"] = config.disk_layout_summary(vm)
+        declared[vm.name] = entry
+    return declared
 
 
 def main() -> int:

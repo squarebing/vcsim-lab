@@ -14,6 +14,11 @@ The per-VM attributes are checked against the resolved assignment
 state and boot delay are core (vcsim serves them reliably); tools
 status is best-effort — it is guest-reported with no setter API and
 vcsim always reports toolsNotInstalled, so a mismatch is a warning.
+
+The basic/dynamic disk layout is declared-only (no vSphere property),
+but VMs with dynamic disks carry the layout in extraConfig, so verify
+checks the live extraConfig value against the declared layout when
+present, and warns when the live VM carries no layout at all.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from .config import (
     ResolvedAssignment,
     VCenterConfig,
     VmSpec,
+    disk_layout_extra_config,
     resolve_random_assignments,
 )
 from .query import summarize_lab
@@ -112,6 +118,21 @@ def verify_vm(
         (d["capacity_gb"], d["datastore"], d["thin"]) for d in live["disks"]
     )
     _check("disks (size_gb, datastore, thin)", expected_disks, actual_disks, failures, warnings)
+    # Disk layout (basic/dynamic): declared-only — vSphere has no
+    # property for it — but VMs with dynamic disks carry the layout in
+    # extraConfig (lab.diskLayout), so a present-but-wrong live value
+    # is a failure while a missing one (VM built before the feature, or
+    # extraConfig not served) is only a warning.
+    expected_layout = disk_layout_extra_config(spec)
+    if expected_layout is not None:
+        live_layout = live.get("disk_layout")
+        if live_layout is None:
+            warnings.append(
+                f"disk_layout: declared {expected_layout!r} but the live VM "
+                "carries no lab.diskLayout extraConfig (declared-only)"
+            )
+        else:
+            _check("disk_layout", expected_layout, live_layout, failures, warnings)
     _check("nic count", len(spec.nics), len(live["nics"]), failures, warnings)
     _check("cdrom", spec.cdrom is not None, live["cdrom"], failures, warnings)
     _check("video_3d", spec.video_3d, live["video_3d"], failures, warnings)

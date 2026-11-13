@@ -20,7 +20,19 @@ import json
 from pyVmomi import vim
 
 from . import devices
+from .config import DISK_LAYOUT_EXTRA_CONFIG_KEY
 from .vcenter import connect, disconnect, list_objs, retrieve_props_multi, safe_name
+
+
+def _disk_label_number(device) -> int:
+    """The N in a disk's "Hard disk N" label, for ordering disks the
+    way the spec lists them (live devices are not guaranteed to come
+    back in creation order). Unparseable labels sort last."""
+    label = getattr(device.deviceInfo, "label", "") or ""
+    try:
+        return int(label.rsplit(" ", 1)[1])
+    except (ValueError, IndexError):
+        return 1 << 30
 
 
 # ---------------------------------------------------------------------------
@@ -132,12 +144,25 @@ def summarize_vm(
         if isinstance(dev, vim.vm.device.VirtualController):
             controllers[dev.key] = type(dev).__name__.replace("Virtual", "")
 
-    disks = [d for d in hw.device if isinstance(d, vim.vm.device.VirtualDisk)]
+    disks = sorted(
+        (d for d in hw.device if isinstance(d, vim.vm.device.VirtualDisk)),
+        key=_disk_label_number,
+    )
     nics = [d for d in hw.device if isinstance(d, vim.vm.device.VirtualEthernetCard)]
     video = [d for d in hw.device if isinstance(d, vim.vm.device.VirtualVideoCard)]
     tpm = devices.has_tpm(hw.device)
     gpus = [d for d in hw.device if isinstance(d, vim.vm.device.VirtualPCIPassthrough)]
     cdrom = any(isinstance(d, vim.vm.device.VirtualCdrom) for d in hw.device)
+
+    # Declared basic/dynamic disk layout, stamped into extraConfig at
+    # create time for VMs with dynamic disks (vcsim serves extraConfig
+    # back intact). None for basic-only VMs and for VMs built before
+    # the feature existed.
+    disk_layout = None
+    for opt in config.extraConfig or []:
+        if opt.key == DISK_LAYOUT_EXTRA_CONFIG_KEY:
+            disk_layout = opt.value
+            break
 
     datastore_names = {}
     for ds in vm.datastore or []:
@@ -163,6 +188,15 @@ def summarize_vm(
         guest_tools_status, tools_running_status, ip = None, None, None
     tools_status = runtime.get("tools_status", guest_tools_status)
     tools_running_status = runtime.get("tools_running_status", tools_running_status)
+    disk_entries = [_disk_info(d, datastore_names) for d in disks]
+    # Attach the declared basic/dynamic type + volume to each live disk
+    # (matched by 1-based index) when the lab file was loaded — the
+    # type is declared-only, so it comes from vms.yaml, not the device.
+    declared_layout = (declared or {}).get("disk_layout") or {}
+    for entry, declared_disk in zip(disk_entries, declared_layout.get("disks") or []):
+        entry["disk_type"] = declared_disk["disk_type"]
+        entry["volume"] = declared_disk["volume"]
+        entry["volume_kind"] = declared_disk["volume_kind"]
     summary = {
         "name": vm.name,
         "path": config.files.vmPathName,
@@ -191,7 +225,11 @@ def summarize_vm(
         "fast_boot": boot_delay_ms == 0 if boot_delay_ms is not None else None,
         "cbt": cbt,
         "controllers": sorted(set(controllers.values())),
-        "disks": [_disk_info(d, datastore_names) for d in disks],
+        "disks": disk_entries,
+        # Live disk-layout string from extraConfig (None for basic-only
+        # VMs); the declared per-disk types live on the disk entries
+        # above when the lab file was loaded.
+        "disk_layout": disk_layout,
         "nics": [_nic_info(n) for n in nics],
         "tools_status": tools_status,
         "tools_running_status": tools_running_status,
@@ -374,12 +412,25 @@ def list_inventory(si) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _disk_short(d: dict) -> str:
+    """One-line disk description, e.g. ``100G/LocalDS_0 thin [basic]``
+    or ``500G/LocalDS_1 [dynamic:SQLData/mirrored]``. The bracketed
+    part is the declared Windows disk type (basic/dynamic) plus the
+    volume name/kind when the disk belongs to one; it is absent when
+    the lab file was not loaded."""
+    text = f"{d['capacity_gb']:g}G/{d['datastore']}{' thin' if d['thin'] else ''}"
+    disk_type = d.get("disk_type")
+    if disk_type is None:
+        return text
+    if disk_type == "dynamic" and d.get("volume"):
+        return f"{text} [dynamic:{d['volume']}/{d['volume_kind']}]"
+    return f"{text} [{disk_type}]"
+
+
 def print_table(summaries: list[dict]) -> None:
     for s in summaries:
         gpu = ", ".join(_gpu_short(g) for g in s["gpus"]) or "—"
-        disks = ", ".join(
-            f"{d['capacity_gb']:g}G/{d['datastore']}{' thin' if d['thin'] else ''}" for d in s["disks"]
-        )
+        disks = ", ".join(_disk_short(d) for d in s["disks"])
         nics = ", ".join(f"{n['type'].replace('Virtual', '')}@{n['network']}" for n in s["nics"])
         tag = " [template]" if s.get("template") else ""
         print(f"{s['name']}{tag} [{s['power']}] {s['guest_id']} {s['cpus']}vCPU {s['memory_mb']}MB {s['firmware']}")
@@ -400,6 +451,11 @@ def print_table(summaries: list[dict]) -> None:
         )
         print(f"  controllers: {', '.join(s['controllers'])}")
         print(f"  disks: {disks}")
+        # When the lab file was not loaded there is no declared type on
+        # the disk entries; the live extraConfig string still shows the
+        # layout for dynamic-disk VMs.
+        if s.get("disk_layout") and not any("disk_type" in d for d in s["disks"]):
+            print(f"  disk layout (live): {s['disk_layout']}")
         print(f"  nics: {nics}")
         print()
 

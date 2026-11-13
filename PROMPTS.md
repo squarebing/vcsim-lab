@@ -204,3 +204,42 @@ suspended VMs before destroying them. Full build 21 VMs /
 75 steps / 0 failed; verify 0 failures, 22 warnings (5 Secure Boot +
 17 tools status, both vcsim limitations); idempotent re-run is a
 no-op on CBT/power; 97 tests (25 new in `tests/test_random_attrs.py`).
+
+## 14. 2026-11-13 15:30 — BIOS vs UEFI, multi-disk VMs, basic vs dynamic disks
+
+> set some VMs to BIOS, some to UEFI..  Set some VMs with multiple disks.  Set some VMs with basic disk and some with dynamic disks. Create new VMs if needed
+
+Firmware was lopsided (4 BIOS / 17 EFI) and only 4 VMs had multiple
+disks. Rebalanced to 10 BIOS / 12 EFI by converting five EFI VMs to
+BIOS (rhel9-db, ubuntu-k8s-node, ubuntu-2404-template, rhel9-template,
+truenas-storage) and adding one new BIOS VM (win2019-fileserver,
+Windows Server 2019). TPM / Secure Boot VMs and Windows 11 VMs stay
+EFI — the loader already rejected TPM or Secure Boot on BIOS, and the
+templates now span both firmwares. 13 of 22 VMs have 2+ disks (40
+disks total): second disks added to win11-secure, ubuntu-gpu-llm,
+rhel9-ai-train, sles15-sap, centos8-legacy, ubuntu-k8s-node and
+win11-amd-mxgpu, third disks to win2022-sql and win10-vdi.
+
+Basic vs. dynamic disk is the Windows Disk Management distinction and
+vSphere has no API property for it (confirmed by searching pyVmomi's
+vim.vm device types — the only "dynamic" hits are the unrelated GPU
+DynamicBackingInfo), so it is a declared per-disk attribute
+(`disk_type: basic | dynamic`, default basic) plus a `volumes:` list
+grouping dynamic disks into named volumes (simple / spanned / striped
+/ mirrored, 1-based disk indexes). The loader validates it: dynamic
+disks are Windows-only, every disk in a volume must be dynamic, and
+spanned/striped/mirrored need 2+ disks. All four volume kinds are
+represented: simple on win11-secure (Data), mirrored on win2022-sql
+(SQLData), striped on win10-vdi (Scratch), spanned on
+win2019-fileserver (FileShare). So the layout is visible in the
+inventory, VMs with dynamic disks carry it in extraConfig
+(`lab.diskLayout`, e.g. `basic; dynamic:SQLData:mirrored;
+dynamic:SQLData:mirrored`) — probed live, vcsim serves extraConfig
+back intact — and the query tool shows the declared type per disk
+while verify checks the live extraConfig value against the declared
+layout (a missing key warns rather than fails, since the layout is
+declared-only by nature). Full build 22 VMs / 77 steps / 0 failed in
+~8s; verify 0 failures, 23 warnings (5 Secure Boot + 18 tools status,
+both vcsim limitations); idempotent re-run and --recreate clean;
+save/load round-trip restores all 22 VMs; 130 tests (33 new in
+`tests/test_firmware_disks.py`).

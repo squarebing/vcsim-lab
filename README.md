@@ -1,7 +1,7 @@
 # vcsim-lab
 
 Build a varied vCenter inventory in [vcsim](https://github.com/vmware/govmomi)
-(the govmomi vSphere simulator) with plain Python + pyVmomi — 21 VMs spanning
+(the govmomi vSphere simulator) with plain Python + pyVmomi — 22 VMs spanning
 Windows, Linux and BSD, BIOS and EFI, NVMe/PVSCSI/LSI storage, standard /
 distributed / NSX networks, TPM, Secure Boot, 3D video, NVIDIA and AMD GPUs
 (passthrough, dynamic and vGPU), three VM templates, and two virtual
@@ -13,10 +13,10 @@ The builder is idempotent (re-runs skip existing VMs) and reports, per VM,
 exactly which steps vcsim accepted.
 
 Validated end to end against govmomi **v0.56.2** on 2026-11-13:
-full build 21 VMs / 75 steps / 0 failed, verify 0 failures
-(5 Secure Boot warnings + 17 tools-status warnings — both vcsim
+full build 22 VMs / 77 steps / 0 failed, verify 0 failures
+(5 Secure Boot warnings + 18 tools-status warnings — both vcsim
 limitations, see below), and a save/load round-trip that restores
-all 21 VMs.
+all 22 VMs.
 
 ## Quickstart
 
@@ -50,7 +50,7 @@ Stop vcsim: `tools/stop-vcsim-binary.sh` (binary) or `docker compose down`.
 ## Layout
 
 ```
-vms.yaml                 the lab: 21 VMs, folders, pools, vApps, networks (single source of truth)
+vms.yaml                 the lab: 22 VMs, folders, pools, vApps, networks (single source of truth)
 docker-compose.yml       vcsim container (vmware/vcsim:v0.56.2)
 requirements.txt         pyvmomi>=8.0, pyyaml>=6.0
 .env.example             VC_HOST/PORT/USER/PASSWORD, VC_INSECURE, VCSIM_VERSION
@@ -63,7 +63,7 @@ render.yaml              Render Blueprint: web service from the Docker Hub image
 .github/workflows/docker-publish.yml   push to main -> build -> Docker Hub -> Render
 
 vcsim_lab/
-  config.py              YAML -> dataclasses + validation (guest IDs, hex PCI IDs, GPU vendor/model, vApp)
+  config.py              YAML -> dataclasses + validation (guest IDs, hex PCI IDs, GPU vendor/model, vApp, disk layout)
   specs.py               pure device planner + CreateVM spec assembly (offline-testable)
   devices.py             device builders: controllers, disks, NICs, CD-ROM, TPM, GPU, boot, vAppConfig
   vcenter.py             connect, leaf property retrieval, task waiting, lookups
@@ -88,9 +88,11 @@ tools/
 tests/test_specs.py      20 offline tests (VM planner/builder)
 tests/test_storage.py    23 offline tests (storage model + reconcile)
 tests/test_gpu_vapp.py   23 offline tests (GPU vendor/model, templates, vAppConfig)
+tests/test_random_attrs.py 25 offline tests (seeded random attributes)
+tests/test_firmware_disks.py 33 offline tests (firmware mix, basic/dynamic disks, volumes)
 tests/test_config.py     4 offline tests (config loading)
 tests/test_vcenter.py    2 offline tests (network lookup)
-                         run all: pytest tests/ -q (72 tests, no vCenter needed)
+                         run all: pytest tests/ -q (130 tests, no vCenter needed)
 ```
 
 ## The lab
@@ -105,27 +107,28 @@ Folders `lab-windows`, `lab-linux`, `lab-gpu`, `lab-templates`,
 
 | VM | OS | vCPU / RAM | Firmware | Storage | Network | Special |
 |---|---|---|---|---|---|---|
-| win11-secure | Windows 11 | 4 / 8 GB | EFI + Secure Boot + TPM | NVMe 100G thin | DVPG0 vmxnet3 | CD-ROM, boot disk > cdrom |
-| win2022-sql | Windows Server 2022 | 8 / 16 GB | EFI + TPM | PVSCSI 100G thin + 500G eager | DVPG0 + DVPG1 | |
-| win10-vdi | Windows 10 | 4 / 8 GB | EFI + Secure Boot + TPM | NVMe 80G thin | DVPG0 vmxnet3 | 3D video, 128 MB VRAM |
-| ubuntu-gpu-llm | Ubuntu | 8 / 32 GB | EFI | NVMe 200G thin | DVPG0 vmxnet3 | GPU passthrough (T4) |
+| win11-secure | Windows 11 | 4 / 8 GB | EFI + Secure Boot + TPM | NVMe 100G thin + 100G thin | DVPG0 vmxnet3 | CD-ROM, boot disk > cdrom; dynamic simple volume (Data) |
+| win2022-sql | Windows Server 2022 | 8 / 16 GB | EFI + TPM | PVSCSI 100G thin + 2× 500G eager | DVPG0 + DVPG1 | mirrored dynamic volume (SQLData) |
+| win10-vdi | Windows 10 | 4 / 8 GB | EFI + Secure Boot + TPM | NVMe 80G thin + 2× 100G thin | DVPG0 vmxnet3 | 3D video, 128 MB VRAM; striped dynamic volume (Scratch) |
+| win2019-fileserver | Windows Server 2019 | 4 / 8 GB | BIOS, vmx-19 | PVSCSI 100G thin + 2× 500G thin | DVPG0 vmxnet3 | spanned dynamic volume (FileShare) |
+| ubuntu-gpu-llm | Ubuntu | 8 / 32 GB | EFI | NVMe 200G + 500G thin | DVPG0 vmxnet3 | GPU passthrough (T4) |
 | ubuntu-vgpu-vdi | Ubuntu | 4 / 16 GB | EFI | NVMe 100G thin | DVPG0 vmxnet3 | vGPU `nvidia_a100-40c` |
-| rhel9-ai-train | RHEL 9 | 16 / 64 GB | EFI + Secure Boot + TPM | NVMe 500G thin | DVPG0 + NSX opaque | GPU dynamic (A100) |
+| rhel9-ai-train | RHEL 9 | 16 / 64 GB | EFI + Secure Boot + TPM | NVMe 2× 500G thin | DVPG0 + NSX opaque | GPU dynamic (A100) |
 | debian12-web | Debian 12 | 2 / 4 GB | BIOS, vmx-19 | LSI SAS 40G thin | VM Network e1000 | PXE first: network > disk |
-| rhel9-db | RHEL 9 | 8 / 32 GB | EFI | PVSCSI 80G + 500G eager + 200G | DVPG0 vmxnet3 | CD-ROM, 3 datastores |
-| sles15-sap | SLES 15 | 8 / 32 GB | EFI + Secure Boot + TPM | NVMe 150G thin | DVPG0 vmxnet3 | CD-ROM first: cdrom > disk |
+| rhel9-db | RHEL 9 | 8 / 32 GB | BIOS | PVSCSI 80G + 500G eager + 200G | DVPG0 vmxnet3 | CD-ROM, 3 datastores |
+| sles15-sap | SLES 15 | 8 / 32 GB | EFI + Secure Boot + TPM | NVMe 150G + 200G thin | DVPG0 vmxnet3 | CD-ROM first: cdrom > disk |
 | freebsd13-nas | FreeBSD 13 | 2 / 4 GB | BIOS, vmx-19 | LSI Logic 60G + 2× LSI SAS 200G | VM Network e1000e | |
-| centos8-legacy | CentOS 8 | 2 / 2 GB | BIOS, vmx-19 | LSI Logic 60G thick lazy | VM Network e1000 | boot disk > network |
-| ubuntu-k8s-node | Ubuntu | 4 / 8 GB | EFI, hot-add | NVMe 100G thin | DVPG0 + DVPG1 | boot disk > network |
+| centos8-legacy | CentOS 8 | 2 / 2 GB | BIOS, vmx-19 | LSI Logic 60G thick lazy + 100G thin | VM Network e1000 | boot disk > network |
+| ubuntu-k8s-node | Ubuntu | 4 / 8 GB | BIOS, hot-add | NVMe 100G + 100G thin | DVPG0 + DVPG1 | boot disk > network |
 | ubuntu-nvidia-a100-pt | Ubuntu | 16 / 64 GB | EFI | NVMe 500G thin | DVPG0 vmxnet3 | GPU passthrough, NVIDIA A100 80GB |
 | ubuntu-nvidia-h100-vgpu | Ubuntu | 8 / 32 GB | EFI | NVMe 200G thin | DVPG0 vmxnet3 | vGPU `nvidia_h100-80c` |
 | rhel9-amd-mi210-pt | RHEL 9 | 16 / 64 GB | EFI | NVMe 500G thin | DVPG0 + NSX opaque | GPU passthrough, AMD MI210 |
-| win11-amd-mxgpu | Windows 11 | 8 / 32 GB | EFI + Secure Boot + TPM | NVMe 200G thin | DVPG0 vmxnet3 | AMD MxGPU (dynamic), 3D video |
+| win11-amd-mxgpu | Windows 11 | 8 / 32 GB | EFI + Secure Boot + TPM | NVMe 200G + 200G thin | DVPG0 vmxnet3 | AMD MxGPU (dynamic), 3D video |
 | win2022-template | Windows Server 2022 | 4 / 8 GB | EFI | NVMe 100G thin | DVPG0 vmxnet3 | template |
-| ubuntu-2404-template | Ubuntu | 2 / 4 GB | EFI | NVMe 60G thin | DVPG0 vmxnet3 | template |
-| rhel9-template | RHEL 9 | 2 / 4 GB | EFI | NVMe 60G thin | DVPG0 vmxnet3 | template |
+| ubuntu-2404-template | Ubuntu | 2 / 4 GB | BIOS | NVMe 60G thin | DVPG0 vmxnet3 | template |
+| rhel9-template | RHEL 9 | 2 / 4 GB | BIOS | NVMe 60G thin | DVPG0 vmxnet3 | template |
 | opnsense-fw | FreeBSD 13 (OPNsense) | 2 / 4 GB | BIOS, vmx-19 | LSI SAS 40G thin | VM Network + DVPG0 | appliance, vApp |
-| truenas-storage | FreeBSD 13 (TrueNAS) | 4 / 8 GB | EFI | NVMe 40G + 200G thin | DVPG0 vmxnet3 | appliance, vApp |
+| truenas-storage | FreeBSD 13 (TrueNAS) | 4 / 8 GB | BIOS | NVMe 40G + 200G thin | DVPG0 vmxnet3 | appliance, vApp |
 
 GPU VMs also get a full memory reservation and the Broadcom KB 334594
 extraConfig (`pciPassthru.use64bitMMIO=TRUE`, `pciPassthru.64bitMMIOSizeGB`).
@@ -173,7 +176,7 @@ per VM with `vapp_container:`):
 - `opnsense-fw` — OPNsense 24.7 firewall (FreeBSD, BIOS), WAN + LAN
   NICs, powered on, with OVF properties `hostname`, `wan_ip`,
   `lan_ip`, `admin_password`.
-- `truenas-storage` — TrueNAS 24.10 storage appliance (FreeBSD, EFI),
+- `truenas-storage` — TrueNAS 24.10 storage appliance (FreeBSD, BIOS),
   OS + 200 GB data disk, powered on, with OVF properties `hostname`,
   `mgmt_ip`, `admin_password`.
 
@@ -185,6 +188,59 @@ and properties, and `verify.py` checks them as core checks. The vApp
 container itself is created with `ResourcePool.CreateVApp` (a
 `ResourcePool` method, not a `Folder` method) and is removed by
 `teardown_lab.py --remove-pools` once its VMs are gone.
+
+### Firmware and disks
+
+The firmware mix is deliberately balanced: **10 BIOS / 12 EFI**. The
+BIOS side is the legacy and FreeBSD half of the lab (Debian, CentOS,
+FreeBSD, both appliances, the database host, the k8s worker, two of the
+three templates, and the Windows Server 2019 file server); EFI is
+required where the VM has a vTPM or Secure Boot — the loader rejects
+TPM or Secure Boot on a BIOS VM — and for the Windows 11 VMs. The
+templates span both firmwares (Windows Server 2022 on EFI, Ubuntu and
+RHEL on BIOS), so cloning covers both boot modes.
+
+**13 of the 22 VMs have 2+ disks** (40 disks in total), spread across
+NVMe, PVSCSI, LSI SAS and LSI Logic controllers, thin and thick
+provisioning, and — for the multi-datastore VMs — the builder's
+cross-datastore directory pre-creation (see below).
+
+**Basic vs. dynamic disks** is the Windows Disk Management distinction,
+and it is declared in the model, not enforced by vSphere: there is no
+vSphere API property for it — a VMDK is the same either way, and
+basic/dynamic is guest-OS configuration (Disk Management / diskpart on
+a real Windows VM). Each disk carries `disk_type: basic` (the default)
+or `dynamic`, and `volumes:` groups dynamic disks into named volumes:
+
+```yaml
+  - name: win2022-sql
+    disks:
+      - { size_gb: 100, controller: pvscsi, datastore: LocalDS_0, thin: true }
+      - { size_gb: 500, controller: pvscsi, datastore: LocalDS_1, thin: false, eager: true, disk_type: dynamic }
+      - { size_gb: 500, controller: pvscsi, datastore: LocalDS_2, thin: false, eager: true, disk_type: dynamic }
+    volumes:
+      - { name: SQLData, kind: mirrored, disks: [2, 3] }
+```
+
+Volume kinds are `simple` (1 disk), `spanned`, `striped` and
+`mirrored` (2+ disks each); disk indexes are 1-based, like the boot
+tokens. The loader validates the model: dynamic disks are Windows-only,
+every disk in a volume must be dynamic, and a spanned/striped/mirrored
+volume needs 2+ disks. The lab covers all four kinds — simple on
+`win11-secure` (`Data`), mirrored on `win2022-sql` (`SQLData`), striped
+on `win10-vdi` (`Scratch`), spanned on `win2019-fileserver`
+(`FileShare`).
+
+So the layout is visible in the inventory rather than only in the YAML,
+VMs with dynamic disks carry it in extraConfig
+(`lab.diskLayout`, e.g. `basic; dynamic:SQLData:mirrored;
+dynamic:SQLData:mirrored`) — vcsim serves extraConfig back intact, so
+the query tool shows the declared type per disk
+(`500G/LocalDS_1 [dynamic:SQLData/mirrored]`, plus a `disk layout
+(live)` line when the lab file is not loaded) and `verify.py` checks
+the live extraConfig value against the declared layout. A VM built
+before the feature existed (no extraConfig key) warns instead of
+failing, since the layout is declared-only by nature.
 
 ### Randomized VM attributes
 
@@ -215,7 +271,7 @@ that — and the power-state step restores the target state afterwards).
 The build report records each VM's assigned values (`assigned: cbt=…
 power=… fast_boot=… tools=…`), and `verify.py` checks the live lab
 against the same resolution. With seed 42 the lab lands at 9 poweredOn
-/ 6 suspended / 6 poweredOff, CBT on 9/21, fast-boot 8/21, and all four
+/ 6 suspended / 7 poweredOff, CBT on 9/22, fast-boot 8/22, and all four
 tools statuses declared.
 
 What vcsim serves vs. what is declared-only (probed live against
@@ -529,7 +585,7 @@ The image (`Dockerfile`, base `python:3.12-slim`) contains the vcsim
 binary plus the lab code. On start, `docker-entrypoint.sh` launches
 vcsim with the same inventory flags as `docker-compose.yml` on
 `0.0.0.0:${PORT:-8989}` (Render injects `$PORT`), waits for the SDK
-endpoint to answer, runs `scripts/build_lab.py` so the 21 VMs exist,
+endpoint to answer, runs `scripts/build_lab.py` so the 22 VMs exist,
 then keeps vcsim in the foreground. Run it locally the same way:
 
 ```bash

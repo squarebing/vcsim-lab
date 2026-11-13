@@ -48,6 +48,13 @@
 #   places the VM inside one of the vApp containers in `lab.vapps`.
 # - Disks: `thin: true` = thin provisioned, `thin: false` + `eager: true` =
 #   thick eager-zeroed, `thin: false` + `eager: false` = thick lazy-zeroed.
+# - `disk_type: basic | dynamic` is the Windows Disk Management
+#   distinction (dynamic disks are Windows-only). vSphere has no API
+#   property for it, so it is declared in the model and stamped into
+#   the VM's extraConfig (`lab.diskLayout`) so it is visible in the
+#   inventory; `volumes:` groups dynamic disks into named volumes
+#   (simple / spanned / striped / mirrored), with disk indexes 1-based
+#   like the boot tokens (disk:2 = second disk).
 # - `datastore` names must exist in the vcsim inventory (default compose file
 #   creates LocalDS_0..2). The builder lists available datastores on error.
 
@@ -97,7 +104,7 @@ networks:
 vms:
   # ---- Windows ---------------------------------------------------------
   - name: win11-secure
-    annotation: "Windows 11 desktop, Secure Boot + vTPM (Windows 11 baseline)"
+    annotation: "Windows 11 desktop, Secure Boot + vTPM (Windows 11 baseline); data disk is a dynamic simple volume"
     guest_id: windows11_64Guest
     os_label: "Windows 11 23H2 (64-bit)"
     cpus: 4
@@ -117,13 +124,16 @@ vms:
     memory_hot_add: true
     disks:
       - { size_gb: 100, controller: nvme, datastore: LocalDS_0, thin: true }
+      - { size_gb: 100, controller: nvme, datastore: LocalDS_1, thin: true, disk_type: dynamic }
+    volumes:
+      - { name: Data, kind: simple, disks: [2] }
     nics:
       - { network: prod, type: vmxnet3 }
     cdrom: { backing: client }
     boot_order: [disk, cdrom]
 
   - name: win2022-sql
-    annotation: "Windows Server 2022, SQL host: OS + eager-zeroed data disk, dual NIC"
+    annotation: "Windows Server 2022, SQL host: OS + mirrored dynamic data volume, dual NIC"
     guest_id: windows2019srvNext_64Guest
     os_label: "Windows Server 2022 (64-bit)"
     cpus: 8
@@ -141,7 +151,10 @@ vms:
     tools_status: random
     disks:
       - { size_gb: 100, controller: pvscsi, datastore: LocalDS_0, thin: true }
-      - { size_gb: 500, controller: pvscsi, datastore: LocalDS_1, thin: false, eager: true }
+      - { size_gb: 500, controller: pvscsi, datastore: LocalDS_1, thin: false, eager: true, disk_type: dynamic }
+      - { size_gb: 500, controller: pvscsi, datastore: LocalDS_2, thin: false, eager: true, disk_type: dynamic }
+    volumes:
+      - { name: SQLData, kind: mirrored, disks: [2, 3] }
     nics:
       - { network: prod, type: vmxnet3 }
       - { network: backup, type: vmxnet3 }
@@ -149,7 +162,7 @@ vms:
     boot_order: [disk]
 
   - name: win10-vdi
-    annotation: "Windows 10 VDI desktop with 3D video (no PCI GPU)"
+    annotation: "Windows 10 VDI desktop with 3D video (no PCI GPU); striped dynamic scratch volume"
     guest_id: windows9_64Guest
     os_label: "Windows 10 (64-bit)"
     cpus: 4
@@ -169,6 +182,38 @@ vms:
     tools_status: random
     disks:
       - { size_gb: 80, controller: nvme, datastore: LocalDS_0, thin: true }
+      - { size_gb: 100, controller: nvme, datastore: LocalDS_1, thin: true, disk_type: dynamic }
+      - { size_gb: 100, controller: nvme, datastore: LocalDS_2, thin: true, disk_type: dynamic }
+    volumes:
+      - { name: Scratch, kind: striped, disks: [2, 3] }
+    nics:
+      - { network: prod, type: vmxnet3 }
+    cdrom: null
+    boot_order: [disk]
+
+  - name: win2019-fileserver
+    annotation: "Windows Server 2019 file server, BIOS, spanned dynamic volume across 2 data disks"
+    guest_id: windows2019srv_64Guest
+    os_label: "Windows Server 2019 (64-bit)"
+    cpus: 4
+    cores_per_socket: 2
+    memory_mb: 8192
+    hardware_version: vmx-19
+    firmware: bios
+    secure_boot: false
+    tpm: false
+    folder: lab-windows
+    resource_pool: lab-general
+    power_state: random
+    cbt: random
+    fast_boot: random
+    tools_status: random
+    disks:
+      - { size_gb: 100, controller: pvscsi, datastore: LocalDS_0, thin: true }
+      - { size_gb: 500, controller: pvscsi, datastore: LocalDS_1, thin: true, disk_type: dynamic }
+      - { size_gb: 500, controller: pvscsi, datastore: LocalDS_2, thin: true, disk_type: dynamic }
+    volumes:
+      - { name: FileShare, kind: spanned, disks: [2, 3] }
     nics:
       - { network: prod, type: vmxnet3 }
     cdrom: null
@@ -176,7 +221,7 @@ vms:
 
   # ---- GPU -------------------------------------------------------------
   - name: ubuntu-gpu-llm
-    annotation: "Ubuntu LLM inference node, PCI passthrough GPU (T4 class)"
+    annotation: "Ubuntu LLM inference node, PCI passthrough GPU (T4 class), OS + model disk"
     guest_id: ubuntu64Guest
     os_label: "Ubuntu Linux 24.04 (64-bit)"
     cpus: 8
@@ -202,6 +247,7 @@ vms:
     tools_status: random
     disks:
       - { size_gb: 200, controller: nvme, datastore: LocalDS_0, thin: true }
+      - { size_gb: 500, controller: nvme, datastore: LocalDS_1, thin: true }
     nics:
       - { network: prod, type: vmxnet3 }
     cdrom: null
@@ -238,7 +284,7 @@ vms:
     boot_order: [disk]
 
   - name: rhel9-ai-train
-    annotation: "RHEL 9 AI training node, dynamic GPU + vTPM + Secure Boot, dual NIC"
+    annotation: "RHEL 9 AI training node, dynamic GPU + vTPM + Secure Boot, OS + training-data disk, dual NIC"
     guest_id: rhel9_64Guest
     os_label: "Red Hat Enterprise Linux 9 (64-bit)"
     cpus: 16
@@ -264,6 +310,7 @@ vms:
     tools_status: random
     disks:
       - { size_gb: 500, controller: nvme, datastore: LocalDS_1, thin: true }
+      - { size_gb: 500, controller: nvme, datastore: LocalDS_2, thin: true }
     nics:
       - { network: prod, type: vmxnet3 }
       - { network: nsx-overlay, type: vmxnet3 }
@@ -296,14 +343,14 @@ vms:
     boot_order: [network, disk]
 
   - name: rhel9-db
-    annotation: "RHEL 9 database host: OS + data + log disks across 3 datastores"
+    annotation: "RHEL 9 database host, BIOS: OS + data + log disks across 3 datastores"
     guest_id: rhel9_64Guest
     os_label: "Red Hat Enterprise Linux 9 (64-bit)"
     cpus: 8
     cores_per_socket: 4
     memory_mb: 32768
     hardware_version: vmx-20
-    firmware: efi
+    firmware: bios
     secure_boot: false
     tpm: false
     folder: lab-linux
@@ -322,7 +369,7 @@ vms:
     boot_order: [disk, cdrom]
 
   - name: sles15-sap
-    annotation: "SLES 15 app host, CD-ROM-first boot (install media), vTPM"
+    annotation: "SLES 15 app host, CD-ROM-first boot (install media), vTPM, OS + SAP data disk"
     guest_id: sles15_64Guest
     os_label: "SUSE Linux Enterprise 15 (64-bit)"
     cpus: 8
@@ -340,6 +387,7 @@ vms:
     tools_status: random
     disks:
       - { size_gb: 150, controller: nvme, datastore: LocalDS_0, thin: true }
+      - { size_gb: 200, controller: nvme, datastore: LocalDS_1, thin: true }
     nics:
       - { network: prod, type: vmxnet3 }
     cdrom: { backing: client }
@@ -372,7 +420,7 @@ vms:
     boot_order: [disk]
 
   - name: centos8-legacy
-    annotation: "CentOS 8 legacy host, BIOS, thick lazy-zeroed disk"
+    annotation: "CentOS 8 legacy host, BIOS, thick lazy-zeroed OS disk + thin data disk"
     guest_id: centos8_64Guest
     os_label: "CentOS 8 (64-bit)"
     cpus: 2
@@ -390,20 +438,21 @@ vms:
     tools_status: toolsOld
     disks:
       - { size_gb: 60, controller: lsi-logic, datastore: LocalDS_2, thin: false, eager: false }
+      - { size_gb: 100, controller: lsi-logic, datastore: LocalDS_2, thin: true }
     nics:
       - { network: vm-network, type: e1000 }
     cdrom: null
     boot_order: [disk, network]
 
   - name: ubuntu-k8s-node
-    annotation: "Ubuntu Kubernetes worker, dual NIC (prod + backup), EFI"
+    annotation: "Ubuntu Kubernetes worker, BIOS, dual NIC (prod + backup), OS + container disk"
     guest_id: ubuntu64Guest
     os_label: "Ubuntu Linux 24.04 (64-bit)"
     cpus: 4
     cores_per_socket: 2
     memory_mb: 8192
     hardware_version: vmx-20
-    firmware: efi
+    firmware: bios
     secure_boot: false
     tpm: false
     folder: lab-linux
@@ -416,6 +465,7 @@ vms:
     memory_hot_add: true
     disks:
       - { size_gb: 100, controller: nvme, datastore: LocalDS_0, thin: true }
+      - { size_gb: 100, controller: nvme, datastore: LocalDS_1, thin: true }
     nics:
       - { network: prod, type: vmxnet3 }
       - { network: backup, type: vmxnet3 }
@@ -519,7 +569,7 @@ vms:
     boot_order: [disk]
 
   - name: win11-amd-mxgpu
-    annotation: "Windows 11 VDI desktop, AMD MxGPU shared GPU (dynamic DirectPath) + vTPM"
+    annotation: "Windows 11 VDI desktop, AMD MxGPU shared GPU (dynamic DirectPath) + vTPM, OS + data disk"
     guest_id: windows11_64Guest
     os_label: "Windows 11 23H2 (64-bit)"
     cpus: 8
@@ -550,6 +600,7 @@ vms:
     tools_status: random
     disks:
       - { size_gb: 200, controller: nvme, datastore: LocalDS_0, thin: true }
+      - { size_gb: 200, controller: nvme, datastore: LocalDS_1, thin: true }
     nics:
       - { network: prod, type: vmxnet3 }
     cdrom: null
@@ -581,14 +632,14 @@ vms:
     boot_order: [disk]
 
   - name: ubuntu-2404-template
-    annotation: "Ubuntu 24.04 LTS base template for cloning"
+    annotation: "Ubuntu 24.04 LTS base template for cloning (BIOS)"
     guest_id: ubuntu64Guest
     os_label: "Ubuntu Linux 24.04 (64-bit)"
     cpus: 2
     cores_per_socket: 1
     memory_mb: 4096
     hardware_version: vmx-20
-    firmware: efi
+    firmware: bios
     secure_boot: false
     tpm: false
     folder: lab-templates
@@ -605,14 +656,14 @@ vms:
     boot_order: [disk]
 
   - name: rhel9-template
-    annotation: "RHEL 9 base template for cloning"
+    annotation: "RHEL 9 base template for cloning (BIOS)"
     guest_id: rhel9_64Guest
     os_label: "Red Hat Enterprise Linux 9 (64-bit)"
     cpus: 2
     cores_per_socket: 1
     memory_mb: 4096
     hardware_version: vmx-20
-    firmware: efi
+    firmware: bios
     secure_boot: false
     tpm: false
     folder: lab-templates
@@ -665,14 +716,14 @@ vms:
         - { id: admin_password, label: "Admin password", type: password, value: changeme }
 
   - name: truenas-storage
-    annotation: "TrueNAS storage appliance (FreeBSD), OS + data disk, OVF properties"
+    annotation: "TrueNAS storage appliance (FreeBSD), BIOS, OS + data disk, OVF properties"
     guest_id: freebsd13_64Guest
     os_label: "FreeBSD 13 (64-bit)"
     cpus: 4
     cores_per_socket: 2
     memory_mb: 8192
     hardware_version: vmx-20
-    firmware: efi
+    firmware: bios
     secure_boot: false
     tpm: false
     folder: lab-appliances

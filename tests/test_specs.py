@@ -42,7 +42,7 @@ def _vm_spec(**overrides):
 class TestConfig(unittest.TestCase):
     def test_lab_loads(self):
         lab = config.load_lab(LAB)
-        self.assertEqual(len(lab.vms), 21)
+        self.assertEqual(len(lab.vms), 22)
         self.assertEqual(lab.datacenter, "DC0")
         self.assertEqual(lab.cluster, "DC0_C0")
 

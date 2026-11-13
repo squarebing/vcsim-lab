@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pyVmomi import vim
 
 from . import devices
-from .config import VmSpec
+from .config import VmSpec, disk_layout_extra_config
 
 
 @dataclass
@@ -219,6 +219,12 @@ def build_create_spec(
         )
         extra.setdefault("pciPassthru.use64bitMMIO", "TRUE")
         extra.setdefault("pciPassthru.64bitMMIOSizeGB", str(spec.gpu.mmio_size_gb))
+    # Basic/dynamic disk layout is declared-only (no vSphere property),
+    # but VMs with dynamic disks carry the layout in extraConfig so it
+    # is visible in the inventory and verify can check it live.
+    layout = disk_layout_extra_config(spec)
+    if layout is not None:
+        extra.setdefault("lab.diskLayout", layout)
     if extra:
         config.extraConfig = [vim.option.OptionValue(key=k, value=v) for k, v in sorted(extra.items())]
 
