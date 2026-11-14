@@ -11,9 +11,11 @@
 #         to the internal vcsim — the container serves plain HTTP,
 #         Render terminates TLS at its edge and forwards HTTP, so
 #         vcsim must not serve HTTPS here)
-# The entrypoint starts vcsim (internal, 127.0.0.1:8989), builds the
-# 22-VM lab, then serves the inventory API on $PORT in the foreground.
-# Render sets $PORT; locally it defaults to 8000.
+# The entrypoint starts one vcsim per environment (internal ports from
+# environments/*/env.yaml), builds each lab, then serves the inventory
+# API on $PORT in the foreground. Render sets $PORT; locally it
+# defaults to 8000. VCSIM_ENVS (comma-separated) limits which
+# environments start; the default is all of them.
 FROM python:3.12-slim
 
 ARG VCSIM_VERSION=v0.56.2
@@ -45,7 +47,8 @@ RUN chmod +x /app/docker-entrypoint.sh
 
 # Documentary only: Render ignores EXPOSE and injects $PORT, which the
 # entrypoint honours (default 8000 when $PORT is unset). The API
-# listens on $PORT; vcsim itself is internal (127.0.0.1:8989).
+# listens on $PORT; each environment's vcsim is internal
+# (127.0.0.1:<env port>, default 8989, dev 8990).
 ENV PORT=8000
 EXPOSE 8000
 

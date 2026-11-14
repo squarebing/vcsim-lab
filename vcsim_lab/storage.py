@@ -148,7 +148,7 @@ def _check(regex, value: str, what: str) -> None:
         raise StorageError(f"invalid {what} {value!r}")
 
 
-def load_storage(path: str | Path = "storage.yaml") -> StorageModel:
+def load_storage(path: str | Path = "environments/default/storage.yaml") -> StorageModel:
     """Load and validate the storage model. Raises StorageError on bad input."""
     path = Path(path)
     if not path.exists():

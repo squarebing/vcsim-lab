@@ -9,7 +9,10 @@
 #      GitHub repo secret so later pushes redeploy automatically.
 #
 # No credentials live in this file: the two env vars are sync: false, so
-# their values are set in the Render dashboard only.
+# their values are set in the Render dashboard only. Optional:
+# VCSIM_ENVS (comma-separated environment names, e.g. "default") limits
+# which environments start at boot — the default is all of them. Set it
+# in the dashboard if the free instance is short on memory.
 services:
   - type: web
     name: vcsim-lab

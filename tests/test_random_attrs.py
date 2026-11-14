@@ -20,7 +20,7 @@ from pyVmomi import vim  # noqa: E402
 
 from vcsim_lab import config, specs, verify  # noqa: E402
 
-LAB = os.path.join(os.path.dirname(__file__), "..", "vms.yaml")
+LAB = os.path.join(os.path.dirname(__file__), "..", "environments", "default", "vms.yaml")
 
 MINIMAL_VM = {
     "name": "x",

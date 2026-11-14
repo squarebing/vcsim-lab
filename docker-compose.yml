@@ -1,22 +1,29 @@
-# vcsim lab — one container: vcsim (internal) + the inventory API (front door).
+# vcsim lab — one container: one vcsim per environment (internal) +
+# the inventory API (front door).
 #
-#   docker compose up -d --build     # build the image, start, build the lab, serve the API
+#   docker compose up -d --build     # build the image, start, build the labs, serve the API
 #   docker compose logs -f vcsim-lab
 #   docker compose down
 #
-# The container runs docker-entrypoint.sh: vcsim starts on an internal
-# port (127.0.0.1:8989), scripts/build_lab.py creates the 22 VMs, and
-# the inventory API listens on 0.0.0.0:8000 — published here on
-# 127.0.0.1:8000. The API serves /api/* itself and reverse-proxies
-# everything else (/sdk, /about) to the internal vcsim, so the SDK
-# endpoint is http://127.0.0.1:8000/sdk (plain HTTP inside the
-# container; the API connects to vcsim over VC_SCHEME=http).
+# The container runs docker-entrypoint.sh: one vcsim per environment in
+# environments/ starts on its internal port (default 127.0.0.1:8989,
+# dev 127.0.0.1:8990), scripts/build_lab.py --env <name> creates each
+# environment's VMs, and the inventory API listens on 0.0.0.0:8000 —
+# published here on 127.0.0.1:8000. The API serves /api/* itself and
+# reverse-proxies everything else (/sdk, /about) to the active
+# environment's vcsim, so the SDK endpoint is
+# http://127.0.0.1:8000/sdk (plain HTTP inside the container; the API
+# connects to vcsim over VC_SCHEME=http). VCSIM_ENVS (comma-separated,
+# e.g. VCSIM_ENVS=default) limits which environments start; the
+# default is all of them.
 #
-# The lab is built inside the container, so there is no need to run
+# The labs are built inside the container, so there is no need to run
 # scripts/build_lab.py from the host on this path. To point the host
 # scripts at the containerised lab instead, use VC_PORT=8000 with
-# VC_SCHEME=http (the API proxies /sdk):
+# VC_SCHEME=http (the API proxies /sdk to the active environment):
 #   VC_PORT=8000 VC_SCHEME=http python scripts/query_lab.py
+# (VC_PORT set explicitly overrides the environment's port — see
+# vcsim_lab.config.vcenter_config_for_env.)
 #
 # Credentials: VCSIM_USERNAME / VCSIM_PASSWORD (defaults user/pass).
 # The image is built from the local Dockerfile (python:3.12-slim +

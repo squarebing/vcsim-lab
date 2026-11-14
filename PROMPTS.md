@@ -308,3 +308,89 @@ VC_SCHEME=http) validated the same way. 151 tests (21 new in
 not available in the sandbox, so the image was not built — the
 entrypoint was syntax-checked and its flow validated by the live
 HTTP-mode simulation instead.
+
+## 16. 2026-11-13 18:17 — Multiple vCenter environments
+
+> reorganize this repo, so that I can create multiple vCenter environments. The current one can be named "default". For endpoints, they stay the same, but I can switch to different environments.
+
+Outcome: the repo is reorganized around `environments/<name>/`, one
+vCenter simulation per directory. Each environment has `env.yaml`
+(name, description, vcsim port, inventory flags), `vms.yaml` (its lab)
+and `storage.yaml` (its storage model). The current lab moved
+unchanged into `environments/default/` (22 VMs, port 8989, same vcsim
+flags); a small new `environments/dev/` (3 VMs, port 8990, 2 hosts, 2
+datastores) proves the mechanism and is the template for new
+environments — copy it, pick a name and an unused port, edit the YAML.
+No code changes are needed to add an environment: the scripts, the API
+and the container discover environments by scanning `environments/`.
+
+`vcsim_lab/config.py` gains the environment model: `Environment`
+(name, port, flags, paths, `vcsim_args()`, `vcenter_config()`),
+`list_environments()` (sorted, duplicate-port rejection) and
+`load_environment(name)`. `env.yaml` flags are all optional (defaults
+match the original lab); the name must match the directory name.
+Credentials stay out of `env.yaml` — VCSIM_USERNAME/VCSIM_PASSWORD
+are shared across environments. All scripts take `--env` (default
+`default`): build/query/query_storage/verify/teardown resolve the lab,
+storage model and vcsim port from the environment; an explicitly set
+VC_PORT still overrides the port (the container-proxy workflow).
+`scripts/env_info.py` prints shell assignments for an environment so
+the shell scripts can read env.yaml; the tools take `--env` too
+(per-environment pid/log files, `model/<env>/` save dirs;
+`stop-vcsim-binary.sh --all` stops every environment).
+
+The API serves all environments from the same endpoints
+(`vcsim_lab/api.py` builds an `EnvironmentRegistry` at startup, one
+target per environment with its own port and declared models, loaded
+best-effort). Switching works two ways: globally, `POST
+/api/environment {"name": "dev"}` switches the active environment
+(in-memory; restarts default to `default`) — unknown names are a 404
+and switching to an unreachable environment is a 503 that leaves the
+active environment unchanged; per request, `?env=<name>` (or the
+`X-Environment` header, query param wins) serves one request from
+another environment without changing the active one, and the resolved
+environment is stamped on the `X-Environment` response header. New
+endpoints: `GET /api/environments` (all environments with live status
+and VM counts) and `GET /api/environment` (the active one);
+`/api/health` now reports per-environment status too. The reverse
+proxy routes to the selected environment as well (`/sdk?env=dev` pins
+one SOAP session to dev's vcsim; the `env` pin is stripped from the
+forwarded query string). SOAP-session caveat, documented in the code
+and README: a session cookie belongs to one vcsim, so do not switch
+the active environment mid-session — reconnect, or pin with
+`/sdk?env=<name>`.
+
+Wiring: `docker-entrypoint.sh` starts one vcsim per environment (each
+on its internal port from env.yaml, `-tls=false`), builds each lab,
+then serves the API; `VCSIM_ENVS` (comma-separated) limits which
+environments start, default all. `docker-compose.yml` / `Dockerfile` /
+`render.yaml` / `.env.example` updated for the multi-env flow (the
+Dockerfile copies the whole project, so no structural change was
+needed there). Validated live against govmomi v0.56.2: both
+environments running concurrently (default 8989, dev 8990), both labs
+built and verified, API switching + per-request override + proxied
+`/sdk` (real pyVmomi client) + `/about` all proven; the real
+entrypoint was run end-to-end in the sandbox via an `/app` symlink
+(both vcsim instances in plain-HTTP Render mode, both lab builds,
+API, TERM-trap cleanup, and a `VCSIM_ENVS=dev` subset run all
+verified). Validations during live testing found and fixed three
+things: (1)
+`env_info.py` printed the flag list unquoted, so `eval` in the shell
+scripts ran its second word as a command — values are now
+shlex-quoted, with a regression test that evals the output in bash;
+(2) pyVmomi's `SmartConnect(path='/sdk?env=dev')` mangles its
+version probe into `/sdk?env=dev/vimServiceVersions.xml`, so the
+proxy now splits that suffix back out (env names never contain `/`)
+and forwards the probe to the pinned environment — both
+`path='/sdk?env=dev'` and `customHeaders={"X-Environment": "dev"}`
+pin a real pyVmomi session, verified live; (3) the entrypoint now
+passes the first started environment as the API's active env
+(`--active-env`), so with `VCSIM_ENVS=dev` the endpoints serve dev
+out of the box instead of an unreachable `default`. 187 tests (19
+new in `tests/test_environments.py`, 17 new/changed in
+`tests/test_api.py`).
+Docker is not available in the sandbox, so the image was not built —
+the entrypoint was syntax-checked and run live in the sandbox
+instead. Note: the old top-level `vms.yaml` / `storage.yaml`
+still exist on GitHub until deleted via the web UI (the push
+procedure cannot delete files).

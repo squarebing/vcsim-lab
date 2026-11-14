@@ -1,0 +1,55 @@
+# dev environment host storage — a small declared model (1 array, 2 LUNs).
+#
+# Same format as environments/default/storage.yaml (see its header for
+# the rules): vcsim serves only local storage, so this file declares
+# the shared storage the dev environment is *meant* to have, and
+# `scripts/query_storage.py --env dev` reconciles it against what
+# vcsim actually serves. Host names match this environment's vcsim
+# inventory (2 cluster hosts + 1 standalone host).
+
+arrays:
+  - id: dev-array-01
+    vendor: Pure Storage
+    model: FlashArray//X20
+    protocol: fc
+    controllers: [CT0, CT1]
+    ports:
+      - { name: CT0.FC0, wwpn: "50:0a:09:80:00:02:01:01" }
+      - { name: CT1.FC0, wwpn: "50:0a:09:80:00:02:01:02" }
+    luns:
+      - id: dev-lun-00
+        label: dev-vol-00
+        naa: naa.624a937002000001
+        capacity_gb: 1024
+        datastore: LocalDS_0
+      - id: dev-lun-01
+        label: dev-vol-01
+        naa: naa.624a937002000002
+        capacity_gb: 1024
+        datastore: LocalDS_1
+
+hosts:
+  DC0_C0_H0:
+    hbas:
+      - device: vmhba2
+        type: fc
+        model: "Emulex LPe36000"
+        driver: lpfc
+        wwpn: "10:00:00:10:9b:02:01:11"
+        speed_gbps: 32
+  DC0_C0_H1:
+    hbas:
+      - device: vmhba2
+        type: fc
+        model: "Emulex LPe36000"
+        driver: lpfc
+        wwpn: "10:00:00:10:9b:02:01:21"
+        speed_gbps: 32
+  DC0_H0:
+    hbas:
+      - device: vmhba2
+        type: fc
+        model: "Emulex LPe36000"
+        driver: lpfc
+        wwpn: "10:00:00:10:9b:02:01:41"
+        speed_gbps: 32

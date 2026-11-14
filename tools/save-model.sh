@@ -1,19 +1,31 @@
 #!/usr/bin/env bash
-# Save the running vcsim inventory to ./model so a later vcsim can start
-# from it with `-load` (fast restarts, same inventory, no rebuild).
+# Save a running vcsim inventory to model/<env> so a later vcsim can
+# start from it with `-load` (fast restarts, same inventory, no rebuild).
 #
-#   tools/save-model.sh
+#   tools/save-model.sh [--env default]
 #
 # Requires govc (downloaded once into ./bin if missing). The vcsim
-# instance must be running and the lab built.
+# instance for that environment must be running and the lab built.
 #
-# After saving, restart vcsim and it will pick the model up:
-#   - binary: tools/stop-vcsim-binary.sh && tools/start-vcsim-binary.sh
-#     (start script uses ./model automatically when present)
-#   - docker: uncomment the volume + -load command in docker-compose.yml,
-#     then: docker compose down && docker compose up -d
+# After saving, restart that environment's vcsim and it will pick the
+# model up (start script uses model/<env> automatically when present):
+#   tools/stop-vcsim-binary.sh --env dev && tools/start-vcsim-binary.sh --env dev
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+ENV="default"
+if [ "${1:-}" = "--env" ]; then
+  ENV="${2:-}"
+  if [ -z "$ENV" ]; then echo "usage: $0 [--env NAME]" >&2; exit 2; fi
+elif [ -n "${1:-}" ]; then
+  echo "usage: $0 [--env NAME]" >&2
+  exit 2
+fi
+
+if ! eval "$(python3 scripts/env_info.py --env "$ENV")"; then
+  echo "cannot load environment '$ENV' (is PyYAML installed? pip install -r requirements.txt)" >&2
+  exit 2
+fi
 
 VERSION="${VCSIM_VERSION:-v0.56.2}"
 OS="$(uname -s)"
@@ -35,7 +47,9 @@ if [ ! -x "$GOVC" ]; then
   chmod +x "$GOVC"
 fi
 
-export GOVC_URL="https://${VC_USER:-user}:${VC_PASSWORD:-pass}@${VC_HOST:-127.0.0.1}:${VC_PORT:-8989}/sdk"
+# The environment's vcsim port, unless VC_PORT is set explicitly (same
+# override rule as the Python scripts — see vcenter_config_for_env).
+export GOVC_URL="https://${VC_USER:-user}:${VC_PASSWORD:-pass}@${VC_HOST:-127.0.0.1}:${VC_PORT:-${ENV_PORT}}/sdk"
 export GOVC_INSECURE=true
 
 # object.save with no PATH saves from ServiceContent: the whole inventory
@@ -44,5 +58,5 @@ export GOVC_INSECURE=true
 # `-dc DC0 /`, omits the root folder, and a later `-load` serves an
 # empty inventory even though the objects load.) -f removes any previous
 # save in the directory first.
-"$GOVC" object.save -f -d model
-echo "model saved to ./model ($(find model -type f | wc -l) files)"
+"$GOVC" object.save -f -d "$ENV_MODEL_DIR"
+echo "model saved to ./$ENV_MODEL_DIR ($(find "$ENV_MODEL_DIR" -type f | wc -l) files)"

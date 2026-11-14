@@ -2,6 +2,12 @@
 
 This module has no pyVmomi dependency so the YAML matrix and the device
 planner can be unit-tested without a vCenter connection.
+
+Environments: the repo holds one vCenter simulation per directory under
+``environments/`` — each with ``env.yaml`` (name, description, vcsim
+port, inventory flags), ``vms.yaml`` (the lab) and ``storage.yaml``
+(the storage model). See ``Environment`` / ``list_environments`` /
+``load_environment`` below, and README "Multiple environments".
 """
 
 from __future__ import annotations
@@ -340,6 +346,218 @@ class VCenterConfig:
 
 
 # ---------------------------------------------------------------------------
+# Environments
+# ---------------------------------------------------------------------------
+
+# One vCenter simulation per directory under environments/:
+#   environments/<name>/env.yaml      name, description, vcsim port, flags
+#   environments/<name>/vms.yaml      that environment's lab
+#   environments/<name>/storage.yaml  that environment's storage model
+# The original lab lives in environments/default/ (port 8989, so
+# existing local workflows keep working); environments/dev/ is the
+# small template for new environments.
+DEFAULT_ENVIRONMENT = "default"
+ENVIRONMENTS_DIR = "environments"
+
+# vcsim inventory flags (env.yaml `vcsim:` map, key -> CLI flag). All
+# optional — omitted keys take these defaults, which match the original
+# lab's start flags. `-vm 0` is NOT here: the lab always builds the VMs
+# itself, so every environment starts with zero stock VMs.
+VCSIM_FLAG_DEFAULTS: dict[str, str | int] = {
+    "api_version": "8.0.3",
+    "datacenters": 1,
+    "clusters": 1,
+    "hosts": 3,
+    "standalone_hosts": 1,
+    "datastores": 3,
+    "pods": 1,
+    "portgroups": 2,
+    "nsx": 1,
+    "pools": 1,
+}
+_VCSIM_FLAG_ARGS = {
+    "api_version": "-api-version",
+    "datacenters": "-dc",
+    "clusters": "-cluster",
+    "hosts": "-host",
+    "standalone_hosts": "-standalone-host",
+    "datastores": "-ds",
+    "pods": "-pod",
+    "portgroups": "-pg",
+    "nsx": "-nsx",
+    "pools": "-pool",
+}
+
+
+@dataclass
+class Environment:
+    """One vCenter simulation: its identity, port and inventory shape.
+
+    Credentials are NOT part of an environment — they come from the
+    VCSIM_USERNAME / VCSIM_PASSWORD environment variables, shared
+    across all environments (see ``vcenter_config``).
+    """
+
+    name: str
+    description: str = ""
+    port: int = 8989
+    # vcsim inventory flags (env.yaml `vcsim:` map merged over
+    # VCSIM_FLAG_DEFAULTS): api_version, datacenters, clusters, hosts,
+    # standalone_hosts, datastores, pods, portgroups, nsx, pools.
+    vcsim: dict = field(default_factory=dict)
+    # environments/<name> and the project root (parent of environments/).
+    directory: Path = Path(".")
+    root: Path = Path(".")
+
+    @property
+    def lab_path(self) -> Path:
+        return self.directory / "vms.yaml"
+
+    @property
+    def storage_path(self) -> Path:
+        return self.directory / "storage.yaml"
+
+    @property
+    def env_yaml_path(self) -> Path:
+        return self.directory / "env.yaml"
+
+    @property
+    def model_dir(self) -> Path:
+        """Where this environment's saved vcsim model lives (model/<name>/)."""
+        return self.root / "model" / self.name
+
+    def vcsim_args(self) -> list[str]:
+        """The vcsim CLI flags for this environment's inventory shape
+        (without -l / -tls / -username / -password / -vm, which the
+        caller supplies). Values are validated ints/strings, so the
+        list is safe to pass to a subprocess or print for a shell."""
+        args: list[str] = []
+        for key, flag in _VCSIM_FLAG_ARGS.items():
+            args.extend([flag, str(self.vcsim[key])])
+        return args
+
+    def vcenter_config(self, base: VCenterConfig | None = None) -> VCenterConfig:
+        """Connection settings for this environment's vcsim: host,
+        scheme, credentials and TLS behaviour from ``base`` (default:
+        the VC_* environment variables), port from this environment.
+        An explicitly set VC_PORT does NOT override here — the API
+        connects to several environments at once, so each one must use
+        its own port. (The single-environment CLI scripts apply the
+        VC_PORT override themselves; see ``vcenter_config_for_env``.)"""
+        base = base or VCenterConfig.from_env()
+        return VCenterConfig(
+            host=base.host,
+            port=self.port,
+            user=base.user,
+            password=base.password,
+            insecure=base.insecure,
+            scheme=base.scheme,
+        )
+
+
+def vcenter_config_for_env(env: Environment) -> VCenterConfig:
+    """Connection settings for the CLI scripts talking to one
+    environment: as ``Environment.vcenter_config``, except an
+    explicitly set VC_PORT wins over the environment's port. That is
+    how the host scripts point at the container's proxied /sdk
+    (``VC_PORT=8000 VC_SCHEME=http python scripts/query_lab.py``) —
+    the container's vcsim instances are internal, so their own ports
+    are not reachable from the host. Normally leave VC_PORT unset and
+    the environment's port is used."""
+    if "VC_PORT" in os.environ:
+        base = VCenterConfig.from_env()
+        return base  # from_env already read the explicit VC_PORT
+    return env.vcenter_config()
+
+
+def _load_env_yaml(path: Path) -> Environment:
+    """Parse one env.yaml; ``path`` is environments/<name>/env.yaml."""
+    if not path.exists():
+        raise ConfigError(f"env.yaml not found: {path}")
+    with path.open() as fh:
+        raw = yaml.safe_load(fh) or {}
+    name = _require(raw, "name", f"{path}")
+    if not isinstance(name, str) or not name:
+        raise ConfigError(f"{path}: name must be a non-empty string")
+    if name != path.parent.name:
+        raise ConfigError(
+            f"{path}: name {name!r} does not match its directory {path.parent.name!r} "
+            "(an environment's name is its directory name)"
+        )
+    port = _require(raw, "port", f"{path}")
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise ConfigError(f"{path}: port must be an integer between 1 and 65535, got {port!r}")
+    vcsim_raw = raw.get("vcsim") or {}
+    if not isinstance(vcsim_raw, dict):
+        raise ConfigError(f"{path}: vcsim must be a mapping of inventory flags")
+    unknown = sorted(set(vcsim_raw) - set(VCSIM_FLAG_DEFAULTS))
+    if unknown:
+        raise ConfigError(
+            f"{path}: unknown vcsim flag(s) {unknown}; known flags are "
+            f"{sorted(VCSIM_FLAG_DEFAULTS)}"
+        )
+    vcsim: dict[str, str | int] = dict(VCSIM_FLAG_DEFAULTS)
+    for key, value in vcsim_raw.items():
+        if key == "api_version":
+            if not isinstance(value, str) or not value:
+                raise ConfigError(f"{path}: vcsim.api_version must be a non-empty string")
+            vcsim[key] = value
+        else:
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ConfigError(
+                    f"{path}: vcsim.{key} must be a non-negative integer, got {value!r}"
+                )
+            vcsim[key] = value
+    description = raw.get("description", "")
+    if not isinstance(description, str):
+        raise ConfigError(f"{path}: description must be a string")
+    return Environment(
+        name=name,
+        description=description,
+        port=port,
+        vcsim=vcsim,
+        directory=path.parent,
+        root=path.parent.parent.parent,
+    )
+
+
+def list_environments(env_root: str | Path = ENVIRONMENTS_DIR) -> list[Environment]:
+    """All environments under ``env_root`` (default ``environments/``),
+    sorted by name. Raises ConfigError when two environments share a
+    vcsim port (each vcsim needs its own port) or when an env.yaml is
+    invalid. An empty list when the directory does not exist (callers
+    that need at least one environment — the API, the entrypoint —
+    fail fast on that themselves)."""
+    root = Path(env_root)
+    if not root.is_dir():
+        return []
+    envs = []
+    for child in sorted(root.iterdir()):
+        if child.is_dir() and (child / "env.yaml").exists():
+            envs.append(_load_env_yaml(child / "env.yaml"))
+    seen_ports: dict[int, str] = {}
+    for env in envs:
+        if env.port in seen_ports:
+            raise ConfigError(
+                f"environments {seen_ports[env.port]!r} and {env.name!r} both use "
+                f"vcsim port {env.port} — each environment needs its own port"
+            )
+        seen_ports[env.port] = env.name
+    return envs
+
+
+def load_environment(name: str, env_root: str | Path = ENVIRONMENTS_DIR) -> Environment:
+    """The environment called ``name``. Raises ConfigError naming the
+    available environments when it does not exist."""
+    envs = list_environments(env_root)
+    for env in envs:
+        if env.name == name:
+            return env
+    available = ", ".join(e.name for e in envs) or "(none — no environments/ directory?)"
+    raise ConfigError(f"unknown environment {name!r}; available: {available}")
+
+
+# ---------------------------------------------------------------------------
 # Loading / validation
 # ---------------------------------------------------------------------------
 
@@ -657,8 +875,10 @@ def _load_vm(raw: dict, warnings: list[str]) -> VmSpec:
     )
 
 
-def load_lab(path: str | Path = "vms.yaml") -> LabConfig:
-    """Load and validate the lab matrix. Raises ConfigError on bad input."""
+def load_lab(path: str | Path = "environments/default/vms.yaml") -> LabConfig:
+    """Load and validate the lab matrix. Raises ConfigError on bad input.
+    The default is the `default` environment's lab; use
+    ``load_environment(name).lab_path`` for other environments."""
     path = Path(path)
     if not path.exists():
         raise ConfigError(f"lab file not found: {path} (run from the project root)")
@@ -754,7 +974,7 @@ def resolve_random_assignments(lab: LabConfig) -> dict[str, ResolvedAssignment]:
     return resolved
 
 
-def load_declared_assignments(path: str | Path = "vms.yaml") -> dict | None:
+def load_declared_assignments(path: str | Path = "environments/default/vms.yaml") -> dict | None:
     """The lab's per-VM declared values (name -> dict), or None when the
     lab file cannot be loaded — callers then show live values only.
 

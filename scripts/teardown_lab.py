@@ -2,7 +2,7 @@
 """Delete the lab VMs (power off first if needed).
 
 Usage (from the project root):
-    python scripts/teardown_lab.py [--lab vms.yaml] [--only NAME ...]
+    python scripts/teardown_lab.py [--env default] [--lab FILE] [--only NAME ...]
                                    [--remove-folders] [--remove-pools]
 """
 
@@ -19,20 +19,24 @@ from vcsim_lab import config, teardown  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Delete the lab VMs.")
-    parser.add_argument("--lab", default="vms.yaml")
+    parser.add_argument("--env", default=config.DEFAULT_ENVIRONMENT,
+                        help="environment to tear down (default: default)")
+    parser.add_argument("--lab", default=None,
+                        help="lab file (default: the environment's vms.yaml)")
     parser.add_argument("--only", nargs="+", help="delete only these VMs")
     parser.add_argument("--remove-folders", action="store_true")
     parser.add_argument("--remove-pools", action="store_true")
     args = parser.parse_args()
 
     try:
-        lab = config.load_lab(args.lab)
+        env = config.load_environment(args.env)
+        lab = config.load_lab(args.lab or env.lab_path)
     except config.ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
     try:
         log = teardown.teardown_lab(
-            config.VCenterConfig.from_env(),
+            config.vcenter_config_for_env(env),
             lab,
             only=args.only,
             remove_folders=args.remove_folders,

@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from vcsim_lab import storage  # noqa: E402
 
-STORAGE_YAML = os.path.join(os.path.dirname(__file__), "..", "storage.yaml")
+STORAGE_YAML = os.path.join(os.path.dirname(__file__), "..", "environments", "default", "storage.yaml")
 
 
 def _base_model() -> dict:

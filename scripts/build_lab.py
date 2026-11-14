@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Build the vcsim lab from vms.yaml.
+"""Build the vcsim lab from an environment's vms.yaml.
 
 Usage (from the project root):
-    python scripts/build_lab.py [--lab vms.yaml] [--only NAME ...]
+    python scripts/build_lab.py [--env default] [--lab FILE] [--only NAME ...]
                                 [--recreate] [--report build-report.json]
                                 [--plan-only]
 
---plan-only prints the device plan for each VM without connecting to
-vCenter. Connection settings come from VC_HOST / VC_PORT / VC_USER /
-VC_PASSWORD (see .env.example).
+--env selects the environment (default: default); the lab comes from
+environments/<env>/vms.yaml unless --lab overrides it, and the vcsim
+port from environments/<env>/env.yaml unless VC_PORT is set (see
+vcsim_lab.config.vcenter_config_for_env). --plan-only prints the device
+plan for each VM without connecting to vCenter. Connection settings
+come from VC_HOST / VC_USER / VC_PASSWORD (see .env.example).
 """
 
 from __future__ import annotations
@@ -23,8 +26,11 @@ from vcsim_lab import build, config, specs  # noqa: E402
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build the vcsim lab from vms.yaml.")
-    parser.add_argument("--lab", default="vms.yaml")
+    parser = argparse.ArgumentParser(description="Build the vcsim lab from an environment's vms.yaml.")
+    parser.add_argument("--env", default=config.DEFAULT_ENVIRONMENT,
+                        help="environment to build (default: default)")
+    parser.add_argument("--lab", default=None,
+                        help="lab file (default: the environment's vms.yaml)")
     parser.add_argument("--only", nargs="+", help="build only these VMs")
     parser.add_argument("--recreate", action="store_true", help="delete existing VMs first")
     parser.add_argument("--report", default=None, help="write the build report as JSON")
@@ -32,7 +38,8 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        lab = config.load_lab(args.lab)
+        env = config.load_environment(args.env)
+        lab = config.load_lab(args.lab or env.lab_path)
     except config.ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
@@ -65,8 +72,10 @@ def main() -> int:
             print()
         return 0
 
+    cfg = config.vcenter_config_for_env(env)
+    print(f"environment {env.name!r}: building {len(lab.vms)} VMs on {cfg.host}:{cfg.port}")
     try:
-        report = build.build_lab(config.VCenterConfig.from_env(), lab, only=args.only, recreate=args.recreate)
+        report = build.build_lab(cfg, lab, only=args.only, recreate=args.recreate)
     except Exception as exc:  # noqa: BLE001 — CLI surface
         print(f"build failed: {exc}", file=sys.stderr)
         return 1

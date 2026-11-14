@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Query host storage in the vcsim lab with pyVmomi.
 
-Combines the declared storage model (storage.yaml: arrays, fabric HBAs,
-array LUNs, LUN -> datastore mapping) with what vcsim actually serves
-per host (HBAs, SCSI LUNs, multipath, datastore mounts), and says
-plainly where the two diverge.
+Combines the declared storage model (environments/<env>/storage.yaml:
+arrays, fabric HBAs, array LUNs, LUN -> datastore mapping) with what
+vcsim actually serves per host (HBAs, SCSI LUNs, multipath, datastore
+mounts), and says plainly where the two diverge.
 
 Usage (from the project root):
-    python scripts/query_storage.py [--json] [--only HOST ...]
-    python scripts/query_storage.py --storage-yaml storage.yaml
+    python scripts/query_storage.py [--env default] [--json] [--only HOST ...]
+    python scripts/query_storage.py --storage-yaml FILE
 """
 
 from __future__ import annotations
@@ -112,22 +112,29 @@ def print_report(report: dict) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Query host storage in the vcsim lab.")
+    parser.add_argument("--env", default=config.DEFAULT_ENVIRONMENT,
+                        help="environment to query (default: default)")
     parser.add_argument("--json", action="store_true", help="print the reconciled report as JSON")
     parser.add_argument("--only", nargs="+", help="show only these hosts")
     parser.add_argument(
-        "--storage-yaml", default="storage.yaml", help="storage model file (default: storage.yaml)"
+        "--storage-yaml", default=None,
+        help="storage model file (default: the environment's storage.yaml)",
     )
     args = parser.parse_args()
 
     try:
-        model = storage.load_storage(args.storage_yaml)
+        env = config.load_environment(args.env)
+        model = storage.load_storage(args.storage_yaml or env.storage_path)
+    except config.ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
     except storage.StorageError as exc:
         print(f"storage model error: {exc}", file=sys.stderr)
         return 1
     for warning in model.warnings:
         print(f"warning: {warning}", file=sys.stderr)
 
-    cfg = config.VCenterConfig.from_env()
+    cfg = config.vcenter_config_for_env(env)
     try:
         si = connect(cfg)
     except Exception as exc:  # noqa: BLE001 — CLI surface

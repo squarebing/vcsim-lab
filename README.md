@@ -1,16 +1,20 @@
 # vcsim-lab
 
-Build a varied vCenter inventory in [vcsim](https://github.com/vmware/govmomi)
-(the govmomi vSphere simulator) with plain Python + pyVmomi — 22 VMs spanning
-Windows, Linux and BSD, BIOS and EFI, NVMe/PVSCSI/LSI storage, standard /
-distributed / NSX networks, TPM, Secure Boot, 3D video, NVIDIA and AMD GPUs
-(passthrough, dynamic and vGPU), three VM templates, and two virtual
-appliances in a vApp — then query it back the way you would query a real
-vCenter.
+Build varied vCenter inventories in [vcsim](https://github.com/vmware/govmomi)
+(the govmomi vSphere simulator) with plain Python + pyVmomi — the
+`default` environment has 22 VMs spanning Windows, Linux and BSD, BIOS
+and EFI, NVMe/PVSCSI/LSI storage, standard / distributed / NSX networks,
+TPM, Secure Boot, 3D video, NVIDIA and AMD GPUs (passthrough, dynamic
+and vGPU), three VM templates, and two virtual appliances in a vApp —
+then query it back the way you would query a real vCenter.
 
-Everything is declarative: edit `vms.yaml`, run one command, get the lab.
-The builder is idempotent (re-runs skip existing VMs) and reports, per VM,
-exactly which steps vcsim accepted.
+Everything is declarative: edit an environment's `vms.yaml`, run one
+command, get the lab. The builder is idempotent (re-runs skip existing
+VMs) and reports, per VM, exactly which steps vcsim accepted. The repo
+holds **multiple environments** (see below): one vCenter simulation
+per directory under `environments/`, each with its own vcsim process,
+lab and storage model — the endpoints stay the same, and you switch
+which environment they serve.
 
 Validated end to end against govmomi **v0.56.2** on 2026-11-13:
 full build 22 VMs / 77 steps / 0 failed, verify 0 failures
@@ -26,10 +30,11 @@ cp .env.example .env                   # optional; defaults already match vcsim
 
 # 1. Start vcsim (pick one)
 tools/start-vcsim-binary.sh            # no Docker: downloads the vcsim binary once into ./bin
-# or: docker compose up -d --build    # container: also builds the lab + serves the API on :8000
+# or: tools/start-vcsim-binary.sh --env dev   # the small dev environment (port 8990)
+# or: docker compose up -d --build    # container: builds all labs + serves the API on :8000
 
 # 2. Build the lab (binary path only — compose builds it inside the container)
-python scripts/build_lab.py
+python scripts/build_lab.py            # --env dev for the dev environment
 
 # 3. Look at it
 python scripts/query_lab.py            # table
@@ -46,25 +51,31 @@ Tear down the lab VMs (leaves vcsim running):
 python scripts/teardown_lab.py
 ```
 
-Stop vcsim: `tools/stop-vcsim-binary.sh` (binary) or `docker compose down`.
+Stop vcsim: `tools/stop-vcsim-binary.sh` (binary, `--env dev` or `--all`
+for several) or `docker compose down`.
 
 ## Layout
 
 ```
-vms.yaml                 the lab: 22 VMs, folders, pools, vApps, networks (single source of truth)
-docker-compose.yml       vcsim + lab + API container (builds the project image)
+environments/            one vCenter simulation per directory
+  default/               the full lab (22 VMs, port 8989)
+    env.yaml             name, description, vcsim port, inventory flags
+    vms.yaml             the lab: 22 VMs, folders, pools, vApps, networks (single source of truth)
+    storage.yaml         host storage model: arrays, LUNs, fabric HBAs, LUN -> datastore
+  dev/                   small 3-VM environment (port 8990) — template for new environments
+    env.yaml / vms.yaml / storage.yaml
+docker-compose.yml       vcsim + labs + API container (builds the project image)
 requirements.txt         pyvmomi>=8.0, pyyaml>=6.0, fastapi, uvicorn, httpx
-.env.example             VC_HOST/PORT/USER/PASSWORD, VC_INSECURE, VCSIM_VERSION, API_HOST/PORT
+.env.example             VC_HOST/USER/PASSWORD, VC_INSECURE, VCSIM_VERSION, VCSIM_ENVS, API_HOST/PORT
 PROMPTS.md               log of the prompts that built this project
-storage.yaml             host storage model: arrays, LUNs, fabric HBAs, LUN -> datastore
-Dockerfile               vcsim + lab + API image (python:3.12-slim, vcsim binary)
-docker-entrypoint.sh     start vcsim (internal), build the lab, serve the API
+Dockerfile               vcsim + labs + API image (python:3.12-slim, vcsim binary)
+docker-entrypoint.sh     start one vcsim per environment (internal), build the labs, serve the API
 render.yaml              Render Blueprint: web service from the Docker Hub image
 .dockerignore            keep bin/, model/, caches out of the image
 .github/workflows/docker-publish.yml   push to main -> build -> Docker Hub -> Render
 
 vcsim_lab/
-  config.py              YAML -> dataclasses + validation (guest IDs, hex PCI IDs, GPU vendor/model, vApp, disk layout)
+  config.py              YAML -> dataclasses + validation (guest IDs, hex PCI IDs, GPU vendor/model, vApp, disk layout); environments
   specs.py               pure device planner + CreateVM spec assembly (offline-testable)
   devices.py             device builders: controllers, disks, NICs, CD-ROM, TPM, GPU, boot, vAppConfig
   vcenter.py             connect, leaf property retrieval, task waiting, lookups
@@ -73,20 +84,21 @@ vcsim_lab/
   storage.py             storage model (YAML -> dataclasses) + live reconciliation
   verify.py              live lab vs vms.yaml (core checks fail, best-effort warn)
   teardown.py            delete the lab VMs (and folders / pools / vApps on request)
-  api.py                 inventory API (FastAPI): /api/* + reverse proxy to vcsim
+  api.py                 inventory API (FastAPI): /api/* + reverse proxy to vcsim; environment registry + switching
 
 scripts/
-  build_lab.py           [--only NAME ...] [--recreate] [--report FILE] [--plan-only]
-  query_lab.py           [--json] [--inventory] [--pci] [--guest-ids]
-  query_storage.py       [--json] [--only HOST ...] [--storage-yaml FILE]
-  verify_lab.py          exit code 0 when all core checks pass
-  teardown_lab.py        delete the lab VMs
-  serve_api.py           [--host HOST] [--port PORT] [--lab FILE] [--storage-yaml FILE]
+  build_lab.py           [--env NAME] [--only NAME ...] [--recreate] [--report FILE] [--plan-only]
+  query_lab.py           [--env NAME] [--json] [--inventory] [--pci] [--guest-ids]
+  query_storage.py       [--env NAME] [--json] [--only HOST ...] [--storage-yaml FILE]
+  verify_lab.py          [--env NAME] exit code 0 when all core checks pass
+  teardown_lab.py        [--env NAME] delete the lab VMs
+  serve_api.py           [--host HOST] [--port PORT] [--env-root DIR] [--active-env NAME]
+  env_info.py            --list | --env NAME (shell helper: env.yaml details for scripts/entrypoint)
 
 tools/
-  start-vcsim-binary.sh  download + run the vcsim binary (no Docker)
-  stop-vcsim-binary.sh
-  save-model.sh          govc object.save -> ./model for fast restarts (vcsim -load)
+  start-vcsim-binary.sh  download + run the vcsim binary (no Docker) [--env NAME]
+  stop-vcsim-binary.sh   [--env NAME | --all]
+  save-model.sh          govc object.save -> ./model/<env> for fast restarts (vcsim -load) [--env NAME]
 
 tests/test_specs.py      20 offline tests (VM planner/builder)
 tests/test_storage.py    23 offline tests (storage model + reconcile)
@@ -95,19 +107,22 @@ tests/test_random_attrs.py 25 offline tests (seeded random attributes)
 tests/test_firmware_disks.py 33 offline tests (firmware mix, basic/dynamic disks, volumes)
 tests/test_config.py     4 offline tests (config loading)
 tests/test_vcenter.py    2 offline tests (network lookup)
-tests/test_api.py        21 offline tests (API routes, filters, errors, proxy forwarding)
-                         run all: pytest tests/ -q (151 tests, no vCenter needed)
+tests/test_environments.py 19 offline tests (environment discovery, validation, env_info)
+tests/test_api.py        37 offline tests (API routes, filters, errors, environment switching, proxy forwarding)
+                         run all: pytest tests/ -q (187 tests, no vCenter needed)
 ```
 
 ## The lab
 
-One datacenter (`DC0`), one cluster (`DC0_C0`, 3 hosts) + 1 standalone host,
-3 datastores (`LocalDS_0/1/2`), networks `VM Network` (standard),
-`DC0_DVPG0` / `DC0_DVPG1` (distributed portgroups), `DC0_NSX0` (NSX opaque).
-Folders `lab-windows`, `lab-linux`, `lab-gpu`, `lab-templates`,
-`lab-appliances`; resource pools `lab-general`, `lab-gpu`; vApp
-`lab-appliances` (a ResourcePool subtype, created with
-`ResourcePool.CreateVApp`).
+The `default` environment: one datacenter (`DC0`), one cluster
+(`DC0_C0`, 3 hosts) + 1 standalone host, 3 datastores (`LocalDS_0/1/2`),
+networks `VM Network` (standard), `DC0_DVPG0` / `DC0_DVPG1` (distributed
+portgroups), `DC0_NSX0` (NSX opaque). Folders `lab-windows`, `lab-linux`,
+`lab-gpu`, `lab-templates`, `lab-appliances`; resource pools
+`lab-general`, `lab-gpu`; vApp `lab-appliances` (a ResourcePool subtype,
+created with `ResourcePool.CreateVApp`). The `dev` environment is a
+smaller shape (2 cluster hosts + 1 standalone host, 2 datastores) with
+3 VMs — see "Multiple environments".
 
 | VM | OS | vCPU / RAM | Firmware | Storage | Network | Special |
 |---|---|---|---|---|---|---|
@@ -293,9 +308,100 @@ Templates are exempt from power-state assignment (they always stay
 poweredOn`. A VM with no `power_state` derives it from the legacy
 `power_on:` flag.
 
+## Multiple environments
+
+The repo holds one vCenter simulation per directory under
+`environments/` — each with its own vcsim process (own port), its own
+lab and its own storage model. The endpoint paths stay the same; you
+switch which environment they serve.
+
+| Environment | Port | Shape | VMs |
+|---|---|---|---|
+| `default` | 8989 | 1 cluster, 3 hosts + 1 standalone, 3 datastores | 22 (the full lab) |
+| `dev` | 8990 | 1 cluster, 2 hosts + 1 standalone, 2 datastores | 3 (small template env) |
+
+Each environment is three files:
+
+```
+environments/<name>/
+  env.yaml       name, description, vcsim port, inventory flags
+  vms.yaml       that environment's lab (same format as the default lab)
+  storage.yaml   that environment's storage model
+```
+
+`env.yaml` holds the port and the vcsim inventory flags (`api_version`,
+`datacenters`, `clusters`, `hosts`, `standalone_hosts`, `datastores`,
+`pods`, `portgroups`, `nsx`, `pools`) so environments can have
+different shapes; every flag is optional and defaults to the
+`default` lab's values. The `name` must match the directory name, and
+ports must be unique across environments — both are validated on load
+(`config.list_environments` fails fast on a duplicate port).
+Credentials are **not** in `env.yaml`: they come from
+`VCSIM_USERNAME` / `VCSIM_PASSWORD`, shared across environments.
+
+Local workflow — every script and tool takes `--env` (default
+`default`), and several environments can run side by side:
+
+```bash
+tools/start-vcsim-binary.sh --env dev     # vcsim for dev on 127.0.0.1:8990
+python scripts/build_lab.py --env dev     # build dev's 3 VMs
+python scripts/query_lab.py --env dev     # query dev
+python scripts/verify_lab.py --env dev
+python scripts/teardown_lab.py --env dev
+tools/stop-vcsim-binary.sh --env dev      # or --all to stop every environment
+```
+
+The vcsim port comes from the environment's `env.yaml` unless `VC_PORT`
+is set explicitly in the environment — that override exists so the
+host scripts can point at the container's proxied `/sdk`
+(`VC_PORT=8000 VC_SCHEME=http python scripts/query_lab.py`, see
+"CI/CD pipeline").
+
+### Creating a new environment
+
+```bash
+cp -r environments/dev environments/qa
+# 1. edit environments/qa/env.yaml: name: qa, port: 8991 (unused),
+#    and the inventory flags for the shape you want
+# 2. edit environments/qa/vms.yaml: your VMs (datastore names must
+#    exist in that environment's vcsim inventory: LocalDS_0..N-1)
+# 3. edit environments/qa/storage.yaml: arrays/LUNs/hosts to match
+#    (host names are DC0_C0_H0..H<n-1> plus DC0_H0 when the env has a
+#    standalone host)
+tools/start-vcsim-binary.sh --env qa
+python scripts/build_lab.py --env qa
+```
+
+No code changes are needed: the scripts, the API and the container
+discover environments by scanning `environments/`. The API picks the
+new environment up on restart; the container starts it at boot
+(`VCSIM_ENVS` limits which environments start — see "CI/CD pipeline").
+
+Switching in the API — the paths stay the same, the environment
+changes (see "Inventory API" for the full endpoint list):
+
+```bash
+curl localhost:8000/api/environments                 # list all, with status + VM counts
+curl localhost:8000/api/environment                  # the active environment
+curl -X POST localhost:8000/api/environment \
+  -H 'Content-Type: application/json' -d '{"name": "dev"}'   # switch (globally)
+curl localhost:8000/api/vms?env=dev                 # one request from dev, active unchanged
+curl localhost:8000/api/vms -H 'X-Environment: dev' # same via header (?env= wins if both)
+```
+
+The active environment is in-memory state: a restart defaults it to
+`default`. Switching fails fast — an unknown name is a 404, and
+switching to an environment whose vcsim is unreachable is a 503 that
+leaves the active environment unchanged. The proxy honours the same
+selection: `/sdk?env=dev` pins one SOAP session to dev's vcsim.
+A pyVmomi session (cookie) belongs to one vcsim, so do not switch the
+active environment mid-session — reconnect after switching, or pin
+with `/sdk?env=<name>`.
+
 ## Host storage
 
-`storage.yaml` declares the shared storage the lab is *meant* to have —
+`environments/default/storage.yaml` declares the shared storage the
+lab is *meant* to have —
 two arrays, their LUNs, fabric HBAs per host, and the LUN → datastore
 mapping — and `scripts/query_storage.py` reconciles it against what
 vcsim actually serves:
@@ -338,7 +444,11 @@ The lab also serves its inventory as JSON over HTTP. The API is the
 front door of the deployed service: it serves `/api/*` itself and
 reverse-proxies every other path to vcsim, so `/sdk` (the vSphere SOAP
 endpoint) and `/about` (vcsim's methods/types page) keep working
-unchanged on the same port.
+unchanged on the same port. It serves **all environments** from the
+same endpoints: `/api/*` serves the active environment by default,
+`POST /api/environment` switches it, and `?env=<name>` (or the
+`X-Environment` header) selects one environment for a single request
+(see "Multiple environments").
 
 ```
                     ┌─────────────────────────────────────────┐
@@ -348,8 +458,12 @@ unchanged on the same port.
                     │  /*      reverse-proxied ───┐           │
                     └─────────────────────────────┼───────────┘
                                                   ▼
-                                       vcsim (127.0.0.1:8989)
-                                       /sdk, /about, ...
+                                  active environment's vcsim
+                            ┌──────────────────────────────┐
+                            │ default  127.0.0.1:8989     │
+                            │ dev      127.0.0.1:8990     │
+                            │ ...      (one vcsim per env) │
+                            └──────────────────────────────┘
 ```
 
 Run it locally (with vcsim already running — binary path):
@@ -357,14 +471,19 @@ Run it locally (with vcsim already running — binary path):
 ```bash
 python scripts/serve_api.py                 # http://127.0.0.1:8000
 python scripts/serve_api.py --port 9000     # or API_PORT=9000
+python scripts/serve_api.py --active-env dev   # start with dev active
 ```
 
 Or use the container (`docker compose up -d --build`), which starts
-vcsim, builds the lab, and serves the API on `http://127.0.0.1:8000`.
+one vcsim per environment, builds the labs, and serves the API on
+`http://127.0.0.1:8000`.
 
 | Endpoint | What it returns |
 |---|---|
-| `GET /api` | index of the endpoints |
+| `GET /api` | index of the endpoints (+ active environment, environment list) |
+| `GET /api/environments` | all environments: name, description, port, status, VM counts |
+| `GET /api/environment` | the active environment |
+| `POST /api/environment` | switch the active environment (`{"name": "dev"}`; 404 unknown, 503 unreachable) |
 | `GET /api/inventory` | full inventory in one response (VMs, hosts, datastores, networks, pools, vApps) |
 | `GET /api/vms` | all VMs with full summaries (`?template=true/false` filters templates) |
 | `GET /api/vms/{name}` | one VM by name (404 when unknown) |
@@ -372,9 +491,16 @@ vcsim, builds the lab, and serves the API on `http://127.0.0.1:8000`.
 | `GET /api/datastores` | datastores with capacity and mounts |
 | `GET /api/networks` | networks (standard, distributed, NSX opaque) |
 | `GET /api/vapps` | vApp containers with their member VMs |
-| `GET /api/storage` | host storage (HBAs, LUNs, mounts) reconciled with `storage.yaml` |
-| `GET /api/health` | API health + vcsim reachability (503 when vcsim is down) |
+| `GET /api/storage` | host storage (HBAs, LUNs, mounts) reconciled with the environment's `storage.yaml` |
+| `GET /api/health` | API health + per-environment vcsim reachability (503 when the active env is down) |
 | `GET /docs` | interactive OpenAPI docs (FastAPI) |
+
+Every `/api/*` endpoint (except `/api/environments` and
+`/api/environment` themselves) accepts `?env=<name>` or the
+`X-Environment` header to serve one request from another environment
+without changing the active one; the resolved environment is stamped
+on the `X-Environment` response header. An unknown environment in the
+override is a JSON 404.
 
 Implementation notes (`vcsim_lab/api.py`, runner `scripts/serve_api.py`):
 
@@ -382,7 +508,16 @@ Implementation notes (`vcsim_lab/api.py`, runner `scripts/serve_api.py`):
   `list_inventory`, `list_host_pci`, `storage.summarize_storage` — so
   the API shows exactly what the query tools show, including the
   declared-vs-live values (CBT, power state, tools status, disk layout)
-  when `vms.yaml` is present. No new inventory logic lives in the API.
+  from the environment's `vms.yaml`. No new inventory logic lives in
+  the API.
+- At startup the API builds an environment registry from
+  `environments/*/env.yaml`: one target per environment, each with its
+  own vcsim port (from `env.yaml`) and its declared lab/storage models
+  loaded best-effort (a missing file means live-only for that
+  environment, not a startup failure). With no `environments/`
+  directory at all it falls back to a single live-only `default`
+  target from the `VC_*` variables, so the API still works against a
+  bare vCenter.
 - pyVmomi is blocking, so the endpoints are sync `def` functions
   (FastAPI runs them in a thread pool). Each request opens its own
   vCenter connection — a login per request is cheap against vcsim and
@@ -392,10 +527,16 @@ Implementation notes (`vcsim_lab/api.py`, runner `scripts/serve_api.py`):
   `Authorization` and `Cookie`) and body byte-identical, and streams
   the status, headers (including `Set-Cookie`) and body back — so
   pyVmomi/govc clients talking SOAP to `/sdk` through the API port
-  work exactly as if they were talking to vcsim directly. If vcsim is
-  down the proxy answers 502. The proxy client is built with
-  `trust_env=False`, so an environment HTTP proxy (e.g. a corporate
-  `HTTP_PROXY`) is never used for the hop to vcsim.
+  work exactly as if they were talking to vcsim directly. It routes
+  to the selected environment: `?env=<name>` (or `X-Environment`)
+  pins the request to one environment's vcsim, otherwise the active
+  one serves it; the `env` pin is stripped from the forwarded query
+  string and all other params pass through. If vcsim is down the proxy
+  answers 502. The proxy client is built with `trust_env=False`, so an
+  environment HTTP proxy (e.g. a corporate `HTTP_PROXY`) is never
+  used for the hop to vcsim. SOAP-session caveat: a session cookie
+  belongs to one vcsim — do not switch the active environment
+  mid-session; reconnect, or pin with `/sdk?env=<name>`.
 - The API inherits vcsim's quirks, reported honestly like the query
   tool does: tools status is always `toolsNotInstalled`, dynamic GPU
   backings read back degraded (`gpu=unknown`), and Secure Boot is
@@ -406,12 +547,15 @@ Implementation notes (`vcsim_lab/api.py`, runner `scripts/serve_api.py`):
   guard `/sdk` itself — the proxy forwards auth through, it does not
   bypass it.
 
-On Render the API listens on `$PORT` (Render injects it) and vcsim
-runs on internal `127.0.0.1:8989`; the entrypoint builds the lab
-before starting the API, so the port only starts listening once the
-lab exists (~8 s after the container starts). The free plan still
-spins the service down after 15 minutes idle, and every wake rebuilds
-the lab from scratch.
+On Render the API listens on `$PORT` (Render injects it) and one vcsim
+per environment runs on its internal port (`127.0.0.1:8989` for
+`default`, `127.0.0.1:8990` for `dev`); the entrypoint builds every
+lab before starting the API, so the port only starts listening once
+the labs exist (~10 s after the container starts for the two shipped
+environments). `VCSIM_ENVS` (comma-separated, set in the Render
+dashboard) limits which environments start — the default is all of
+them. The free plan still spins the service down after 15 minutes
+idle, and every wake rebuilds the labs from scratch.
 
 ## How it works
 
@@ -456,12 +600,14 @@ full `vAppConfig` back reliably.
 ## Save / load the model
 
 ```bash
-tools/save-model.sh            # govc object.save -> ./model (downloads govc once)
-tools/stop-vcsim-binary.sh && tools/start-vcsim-binary.sh   # auto-loads ./model
+tools/save-model.sh            # govc object.save -> ./model/default (downloads govc once)
+tools/save-model.sh --env dev  # -> ./model/dev
+tools/stop-vcsim-binary.sh && tools/start-vcsim-binary.sh   # auto-loads ./model/default
 ```
 
-The start script picks up `./model` automatically when present; for Docker,
-uncomment the volume + `-load` command in `docker-compose.yml`.
+The start script picks up `./model/<env>` automatically when present;
+for Docker, uncomment the volume + `-load` command in
+`docker-compose.yml`.
 Saving must capture the *whole* ServiceContent (no `-dc`, no path) — a
 subtree save omits the root folder and a later `-load` serves an empty
 inventory even though the objects load. The start script runs vcsim from a
@@ -646,9 +792,9 @@ Broadcom's guest-OS documentation and are validated (warn-only) in
 ## Pointing at a real vCenter
 
 Set `VC_HOST`, `VC_USER`, `VC_PASSWORD` in `.env` and `VC_INSECURE=0` if
-the certificate is trusted. The inventory names in `vms.yaml`
-(datacenter, cluster, datastores, networks) must match the real
-inventory — the builder fails fast on the first missing reference.
+the certificate is trusted. The inventory names in the environment's
+`vms.yaml` (datacenter, cluster, datastores, networks) must match the
+real inventory — the builder fails fast on the first missing reference.
 Notes: a vTPM needs a Key Provider; GPU passthrough needs a host with
 the requested PCI device (or the build reports the fallback); Secure
 Boot and video 3D are honoured for real, so `verify.py`'s warnings
@@ -668,13 +814,19 @@ push to main
 
 The image (`Dockerfile`, base `python:3.12-slim`) contains the vcsim
 binary plus the lab code. On start, `docker-entrypoint.sh` launches
-vcsim with the same inventory flags as `docker-compose.yml` on an
-internal port (`127.0.0.1:8989`), waits for the SDK endpoint to answer,
-runs `scripts/build_lab.py` so the 22 VMs exist, then serves the
-inventory API on `0.0.0.0:${PORT:-8000}` (Render injects `$PORT`) —
-the API is the front door, reverse-proxying `/sdk` and everything else
-to the internal vcsim (see "Inventory API"). Run it locally the same
-way:
+one vcsim per environment in `environments/` — each on its internal
+port from `env.yaml` (`127.0.0.1:8989` for `default`, `127.0.0.1:8990`
+for `dev`), with that environment's inventory flags — waits for each
+SDK endpoint to answer, runs `scripts/build_lab.py --env <name>` so
+each lab exists, then serves the inventory API on
+`0.0.0.0:${PORT:-8000}` (Render injects `$PORT`) — the API is the
+front door, reverse-proxying `/sdk` and everything else to the active
+environment's vcsim (see "Inventory API"). `VCSIM_ENVS`
+(comma-separated, e.g. `VCSIM_ENVS=default`) limits which environments
+start; the default is all of them. The API's active environment
+defaults to the first environment started (`default` when all start;
+with `VCSIM_ENVS=dev` it is `dev`), so the endpoints serve a running
+environment out of the box. Run it locally the same way:
 
 ```bash
 docker build -t vcsim-lab .
@@ -716,13 +868,16 @@ clients still reach the sim over HTTPS at
 
 - Free web services **spin down after 15 minutes without traffic**
   and take about a minute to wake on the next request. The simulator
-  is in-memory, so every wake rebuilds the lab from scratch (the
-  entrypoint runs `build_lab.py` on each start) — anything created
-  interactively in the sim is lost on spin-down.
+  is in-memory, so every wake rebuilds the labs from scratch (the
+  entrypoint runs `build_lab.py --env <name>` for each environment on
+  start) — anything created interactively in the sim is lost on
+  spin-down.
 - Free instances are capped at 750 instance-hours per workspace per
   month, so one always-on service nearly exhausts the budget.
 - There is a health-check endpoint now: `GET /api/health` answers 200
-  when the API can reach vcsim and 503 when it cannot, so it can be
+  when the API can reach the active environment's vcsim and 503 when
+  it cannot, and reports every environment's status — so it can be
   used as Render's health check path. Note the port only starts
-  listening once the lab is built (~8 s after the container starts),
-  because the entrypoint builds the lab before serving the API.
+  listening once the labs are built (~10 s after the container starts
+  for the two shipped environments), because the entrypoint builds
+  the labs before serving the API.

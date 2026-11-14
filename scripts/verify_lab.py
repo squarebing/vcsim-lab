@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Verify the live lab matches vms.yaml. Exit code 0 when all core
-checks pass (TPM/GPU mismatches are warnings, not failures).
+"""Verify the live lab matches an environment's vms.yaml. Exit code 0
+when all core checks pass (TPM/GPU mismatches are warnings, not failures).
 
 Usage (from the project root):
-    python scripts/verify_lab.py [--lab vms.yaml] [--json]
+    python scripts/verify_lab.py [--env default] [--lab FILE] [--json]
 """
 
 from __future__ import annotations
@@ -18,18 +18,22 @@ from vcsim_lab import config, verify  # noqa: E402
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Verify the live lab against vms.yaml.")
-    parser.add_argument("--lab", default="vms.yaml")
+    parser = argparse.ArgumentParser(description="Verify the live lab against an environment's vms.yaml.")
+    parser.add_argument("--env", default=config.DEFAULT_ENVIRONMENT,
+                        help="environment to verify (default: default)")
+    parser.add_argument("--lab", default=None,
+                        help="lab file (default: the environment's vms.yaml)")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
     try:
-        lab = config.load_lab(args.lab)
+        env = config.load_environment(args.env)
+        lab = config.load_lab(args.lab or env.lab_path)
     except config.ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
     try:
-        result = verify.verify_lab(config.VCenterConfig.from_env(), lab)
+        result = verify.verify_lab(config.vcenter_config_for_env(env), lab)
     except Exception as exc:  # noqa: BLE001 — CLI surface
         print(f"verify failed: {exc}", file=sys.stderr)
         return 1

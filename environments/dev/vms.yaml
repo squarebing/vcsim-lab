@@ -1,0 +1,97 @@
+# dev environment inventory — a small 3-VM lab.
+#
+# The template for new environments: one small Windows VM, one small
+# Linux VM, one template. Same format as environments/default/vms.yaml
+# (see its header comments for the full field reference); attributes
+# here are explicit rather than `random` so the dev lab is the same
+# every time it is built.
+#
+# Build it with:  python scripts/build_lab.py --env dev
+# (vcsim for this environment first: tools/start-vcsim-binary.sh --env dev)
+
+lab:
+  datacenter: DC0
+  cluster: DC0_C0
+  random_seed: 7
+  folders:
+    - lab-dev
+  resource_pools:
+    - lab-dev
+
+networks:
+  vm-network:
+    name: "VM Network"
+    type: standard
+  prod:
+    name: DC0_DVPG0
+    type: dvpg
+
+vms:
+  - name: dev-win10
+    annotation: "Small Windows 10 desktop (dev environment)"
+    guest_id: windows9_64Guest
+    os_label: "Windows 10 (64-bit)"
+    cpus: 2
+    memory_mb: 4096
+    hardware_version: vmx-19
+    firmware: bios
+    folder: lab-dev
+    resource_pool: lab-dev
+    power_state: poweredOn
+    cbt: false
+    fast_boot: true
+    tools_status: toolsNotRunning
+    disks:
+      - size_gb: 40
+        controller: lsi-sas
+        datastore: LocalDS_0
+        thin: true
+    nics:
+      - network: vm-network
+        type: e1000
+
+  - name: dev-ubuntu
+    annotation: "Small Ubuntu server (dev environment)"
+    guest_id: ubuntu64Guest
+    os_label: "Ubuntu Linux (64-bit)"
+    cpus: 2
+    memory_mb: 4096
+    hardware_version: vmx-20
+    firmware: efi
+    folder: lab-dev
+    resource_pool: lab-dev
+    power_state: poweredOff
+    cbt: true
+    fast_boot: false
+    tools_status: toolsOk
+    disks:
+      - size_gb: 40
+        controller: nvme
+        datastore: LocalDS_0
+        thin: true
+    nics:
+      - network: prod
+        type: vmxnet3
+
+  - name: dev-ubuntu-template
+    annotation: "Ubuntu template (dev environment)"
+    guest_id: ubuntu64Guest
+    os_label: "Ubuntu Linux (64-bit)"
+    cpus: 2
+    memory_mb: 2048
+    hardware_version: vmx-20
+    firmware: bios
+    folder: lab-dev
+    resource_pool: lab-dev
+    template: true
+    cbt: false
+    fast_boot: true
+    tools_status: toolsNotInstalled
+    disks:
+      - size_gb: 30
+        controller: pvscsi
+        datastore: LocalDS_1
+        thin: true
+    nics:
+      - network: prod
+        type: vmxnet3
