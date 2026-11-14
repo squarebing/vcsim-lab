@@ -394,3 +394,30 @@ the entrypoint was syntax-checked and run live in the sandbox
 instead. Note: the old top-level `vms.yaml` / `storage.yaml`
 still exist on GitHub until deleted via the web UI (the push
 procedure cannot delete files).
+
+## 17. 2026-11-13 18:49 — Fix "unknown active environment 'default\ndev'" on Render
+
+> render is complaining about
+>
+> config error: unknown active environment 'default\ndev'; available: default, dev
+
+Outcome: the Render deploy of the multi-environment reorg failed at
+startup because `docker-entrypoint.sh` derived the API's `--active-env`
+as `${ENVS%% *}` — a suffix strip that only splits on spaces — while
+`scripts/env_info.py --list` prints one environment name per line, so
+with two environments `$ENVS` was the newline-separated string
+"default\ndev" and the whole list was passed as one environment name.
+The API's validation correctly rejected it. Fix: the entrypoint now
+captures the first environment inside its start loop (`FIRST_ENV` set
+from the loop variable on the first iteration), which is a single name
+by construction regardless of whether the list is newline-separated
+(`--list`) or space-separated (`VCSIM_ENVS`). Regression test in
+`tests/test_environments.py`: the loop-capture derivation run in bash
+against the real `--list` output yields `default`, plus a tripwire
+asserting the entrypoint no longer contains the space-only split.
+Validated by running the real `docker-entrypoint.sh` end to end in
+the sandbox via an `/app` symlink (both vcsim instances in plain-HTTP
+Render mode, both labs built, API serving with active env `default`,
+switching + `?env=` override + proxied `/sdk` for both environments
+proven with curl and a real pyVmomi client, TERM-trap cleanup
+verified). 188 tests.

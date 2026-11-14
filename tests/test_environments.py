@@ -193,3 +193,32 @@ def test_env_info_script_lists_and_describes():
     )
     assert missing.returncode == 2
     assert "unknown environment 'nope'" in missing.stderr
+
+
+def test_entrypoint_first_env_is_single_name():
+    """Regression test: the entrypoint derives the API's --active-env
+    from the environment list, and env_info.py --list prints one name
+    per line. The old derivation (${ENVS%% *}) only split on spaces,
+    so with two environments it passed the whole "default\\ndev" list
+    as one name and the API refused to start on Render
+    ("unknown active environment 'default\\ndev'"). The entrypoint now
+    captures the first environment inside its start loop, where the
+    loop variable is always a single name."""
+    # The loop-capture derivation, run in bash against the real --list
+    # output: the first loop iteration yields one environment name.
+    out = subprocess.run(
+        ["bash", "-c",
+         'ENVS="$(python3 scripts/env_info.py --list)"; '
+         'FIRST_ENV=""; for ENV in $ENVS; do '
+         'if [ -z "$FIRST_ENV" ]; then FIRST_ENV="$ENV"; fi; done; '
+         'echo "$FIRST_ENV"'],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "default"
+    # Tripwire: the entrypoint must not derive the first env with the
+    # space-only split again, and it must keep the loop capture.
+    with open(os.path.join(ROOT, "docker-entrypoint.sh")) as fh:
+        entrypoint = fh.read()
+    assert "${ENVS%% *}" not in entrypoint
+    assert 'FIRST_ENV="$ENV"' in entrypoint

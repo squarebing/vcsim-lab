@@ -37,6 +37,7 @@ fi
 
 VCSIM_PIDS=""
 API_PID=""
+FIRST_ENV=""
 
 cleanup() {
   # Kill uvicorn first (it is the public port), then every vcsim.
@@ -62,6 +63,15 @@ export VC_HOST=127.0.0.1 VC_SCHEME=http
 export VC_USER="$VCSIM_USERNAME" VC_PASSWORD="$VCSIM_PASSWORD" VC_INSECURE=1
 
 for ENV in $ENVS; do
+  # First environment started — captured here, not derived from $ENVS
+  # afterwards: $ENVS is newline-separated (env_info.py --list) or
+  # space-separated (VCSIM_ENVS), and a space-only suffix strip would
+  # pass the whole "default\ndev" list as one name to --active-env
+  # (that broke the Render deploy once). The loop variable is always
+  # a single name.
+  if [ -z "$FIRST_ENV" ]; then
+    FIRST_ENV="$ENV"
+  fi
   # Environment details from env.yaml (port, vcsim flags) — fails fast
   # on an unknown name in VCSIM_ENVS.
   ENV_INFO="$(python3 scripts/env_info.py --env "$ENV")" || {
@@ -129,10 +139,10 @@ echo "labs built; serving the inventory API on 0.0.0.0:${PORT} ..."
 # If uvicorn exits on its own, `wait` returns its status and set -e
 # ends the script, which stops all vcsim instances through the EXIT trap.
 # The API's active environment defaults to the first environment
-# started — "default" when all start (the list is sorted), or the
-# first VCSIM_ENVS entry when a subset starts, so the default
-# endpoints serve a running environment instead of a dead one.
-FIRST_ENV="${ENVS%% *}"
+# started (captured in the loop above) — "default" when all start
+# (the list is sorted), or the first VCSIM_ENVS entry when a subset
+# starts, so the default endpoints serve a running environment
+# instead of a dead one.
 python scripts/serve_api.py --host 0.0.0.0 --port "$PORT" --active-env "$FIRST_ENV" &
 API_PID=$!
 wait "$API_PID"
