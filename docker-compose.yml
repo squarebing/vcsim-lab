@@ -1,56 +1,33 @@
-# vcsim lab — 1 datacenter, 1 cluster (3 hosts) + 1 standalone host,
-# 3 datastores, 2 DV portgroups, 1 NSX opaque network, 0 stock VMs.
-# The lab VMs in vms.yaml are created by scripts/build_lab.py, so the
-# simulator starts with a clean slate (-vm 0).
+# vcsim lab — one container: vcsim (internal) + the inventory API (front door).
 #
-# Start:  docker compose up -d
-# Logs:   docker compose logs -f vcsim
-# Stop:   docker compose down
+#   docker compose up -d --build     # build the image, start, build the lab, serve the API
+#   docker compose logs -f vcsim-lab
+#   docker compose down
 #
-# vcsim listens on 127.0.0.1:8989 by default; the SDK endpoint is
-# https://127.0.0.1:8989/sdk (self-signed cert — pyVmomi connects with an
-# unverified context, see vcsim_lab/vcenter.py).
+# The container runs docker-entrypoint.sh: vcsim starts on an internal
+# port (127.0.0.1:8989), scripts/build_lab.py creates the 22 VMs, and
+# the inventory API listens on 0.0.0.0:8000 — published here on
+# 127.0.0.1:8000. The API serves /api/* itself and reverse-proxies
+# everything else (/sdk, /about) to the internal vcsim, so the SDK
+# endpoint is http://127.0.0.1:8000/sdk (plain HTTP inside the
+# container; the API connects to vcsim over VC_SCHEME=http).
 #
-# Pin: vmware/vcsim:v0.56.2 (govmomi release, Nov 2026). Use :latest to
-# float, or change the tag to match a govmomi release you have validated.
+# The lab is built inside the container, so there is no need to run
+# scripts/build_lab.py from the host on this path. To point the host
+# scripts at the containerised lab instead, use VC_PORT=8000 with
+# VC_SCHEME=http (the API proxies /sdk):
+#   VC_PORT=8000 VC_SCHEME=http python scripts/query_lab.py
+#
+# Credentials: VCSIM_USERNAME / VCSIM_PASSWORD (defaults user/pass).
+# The image is built from the local Dockerfile (python:3.12-slim +
+# the vcsim binary from the govmomi release, v0.56.2 by default).
 services:
-  vcsim:
-    image: vmware/vcsim:v0.56.2
+  vcsim-lab:
+    build: .
     container_name: vcsim-lab
     ports:
-      - "127.0.0.1:8989:8989"
-    command:
-      - "-l"
-      - "0.0.0.0:8989"
-      - "-api-version"
-      - "8.0.3"
-      - "-dc"
-      - "1"
-      - "-cluster"
-      - "1"
-      - "-host"
-      - "3"
-      - "-standalone-host"
-      - "1"
-      - "-ds"
-      - "3"
-      - "-pod"
-      - "1"
-      - "-pg"
-      - "2"
-      - "-nsx"
-      - "1"
-      - "-pool"
-      - "1"
-      - "-vm"
-      - "0"
-      - "-username"
-      - "${VCSIM_USERNAME:-user}"
-      - "-password"
-      - "${VCSIM_PASSWORD:-pass}"
-    # To start from a previously saved model instead of a generated one,
-    # save it first (tools/save-model.sh) and then add:
-    #   volumes:
-    #     - ./model:/model:ro
-    # and replace the command flags above with:
-    #   command: ["-load", "/model", "-l", "0.0.0.0:8989"]
+      - "127.0.0.1:8000:8000"
+    environment:
+      - PORT=8000
+      - VCSIM_USERNAME=${VCSIM_USERNAME:-user}
+      - VCSIM_PASSWORD=${VCSIM_PASSWORD:-pass}

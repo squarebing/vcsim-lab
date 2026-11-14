@@ -407,6 +407,50 @@ def list_inventory(si) -> dict:
     }
 
 
+def list_vapps(si) -> list[dict]:
+    """vApp containers with their member VMs (and the vApp's own product
+    info when it is served — the builder sets it at CreateVApp time).
+
+    A vApp is a ResourcePool subtype; its member VMs are its ``vm``
+    list. Member names use safe_name for the same stale-entry reason as
+    list_inventory.
+    """
+    content = si.RetrieveContent()
+    out = []
+    for vapp in list_objs(content, vim.VirtualApp):
+        name = safe_name(vapp)
+        if name is None:
+            continue
+        product = None
+        try:
+            products = getattr(vapp.vAppConfig, "product", None) or []
+            if products:
+                p = products[0]
+                product = {
+                    "name": p.name,
+                    "vendor": p.vendor,
+                    "version": p.version,
+                    "full_version": p.fullVersion,
+                }
+        except Exception:
+            product = None
+        try:
+            members = [n for n in (safe_name(v) for v in (vapp.vm or [])) if n]
+        except Exception:
+            members = []
+        out.append(
+            {
+                "name": name,
+                "parent": safe_name(vapp.parent) if getattr(vapp, "parent", None) else None,
+                "product": product,
+                "vms": sorted(members),
+                "vm_count": len(members),
+            }
+        )
+    out.sort(key=lambda v: v["name"])
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Presentation
 # ---------------------------------------------------------------------------

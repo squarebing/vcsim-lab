@@ -243,3 +243,68 @@ declared-only by nature). Full build 22 VMs / 77 steps / 0 failed in
 both vcsim limitations); idempotent re-run and --recreate clean;
 save/load round-trip restores all 22 VMs; 130 tests (33 new in
 `tests/test_firmware_disks.py`).
+
+## 15. 2026-11-13 16:43 — Inventory API (FastAPI, no API key)
+
+> ok. let' build the api (without API key)
+
+Outcome: the inventory API — `vcsim_lab/api.py` (FastAPI app) plus
+`scripts/serve_api.py` (uvicorn runner). This followed a feasibility
+discussion in the same conversation: FastAPI is not required, but it
+is the nicest option (free OpenAPI docs); the user asked to keep the
+current endpoints and put the API at `/api`. The API is the front door
+on the public port: it serves `/api/*` itself and reverse-proxies
+every other path to vcsim, so `/sdk` (the vSphere SOAP endpoint — the
+lab's own code connects to it) and `/about` (vcsim's methods/types
+page) keep working unchanged on the same port. No authentication, by
+the user's explicit choice — the API is read-only inventory; the vcsim
+credentials still guard `/sdk` itself, since the proxy forwards auth
+through rather than bypassing it.
+
+Endpoints: `/api` (index), `/api/inventory` (full inventory + counts),
+`/api/vms` (full summaries, `?template=true/false` filter),
+`/api/vms/{name}` (404 when unknown), `/api/hosts` (PCI devices, GPU
+capability, their VMs), `/api/datastores`, `/api/networks`,
+`/api/vapps` (new `query.list_vapps`, members + product info),
+`/api/storage` (reconciled with `storage.yaml`, live-only when the
+file is missing), `/api/health` (200 when vcsim is reachable, 503 with
+a JSON body when it is not), plus `/docs`. The endpoints reuse the
+existing read paths (`query.summarize_lab`, `list_inventory`,
+`list_host_pci`, `storage.summarize_storage`) — no new inventory logic
+— and show the declared-vs-live values when `vms.yaml` is present
+(new shared `config.load_declared_assignments`, also used by
+`query_lab.py` now). Each request opens its own vCenter connection
+(sync `def` endpoints, run in FastAPI's thread pool); when vcsim is
+down the endpoints answer 503 and the proxy 502, both with JSON
+bodies. The proxy forwards method, path, query, headers (including
+`Authorization`/`Cookie`) and body byte-identical, and passes status,
+headers (including `Set-Cookie`) and body back.
+
+Wiring: `docker-entrypoint.sh` now starts vcsim on internal
+127.0.0.1:8989, builds the lab, then serves the API on
+0.0.0.0:${PORT:-8000} (uvicorn backgrounded and waited on, so the TERM
+trap fires promptly and cleanup stops both processes);
+`docker-compose.yml` builds the project image and publishes 8000
+(the lab builds inside the container); `Dockerfile` default port is
+8000; `requirements.txt` gains fastapi, uvicorn, httpx; `.env.example`
+gains API_HOST/API_PORT. `render.yaml` needed no change (Render
+injects $PORT).
+
+One real bug found during live validation: the proxy crashed with
+httpx `InvalidURL` at client construction because httpx's default
+`trust_env=True` parses the environment's proxy vars and choked on a
+bare `::1` NO_PROXY entry — fixed with `trust_env=False` (also correct
+in principle: the hop to vcsim must never use an environment proxy),
+with a regression test asserting it. Validated live against govmomi
+v0.56.2: fresh build 22 VMs / 77 steps / 0 failed; all endpoints
+return correct data (22 VMs, 4 hosts, 3 datastores, 6 networks, 1
+vApp, 2 arrays); `/docs` loads; a real pyVmomi client logs in through
+the proxied `/sdk` and sees all 22 VMs with the session cookie
+surviving; `/about` through the proxy matches vcsim's output
+directly; vcsim-down behavior verified (health 503, `/api/vms` 503,
+proxy 502); the container's plain-HTTP path (`-tls=false`,
+VC_SCHEME=http) validated the same way. 151 tests (21 new in
+`tests/test_api.py`, mocked vCenter + fake httpx backend). Docker is
+not available in the sandbox, so the image was not built — the
+entrypoint was syntax-checked and its flow validated by the live
+HTTP-mode simulation instead.

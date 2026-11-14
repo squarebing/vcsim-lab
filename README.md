@@ -26,9 +26,9 @@ cp .env.example .env                   # optional; defaults already match vcsim
 
 # 1. Start vcsim (pick one)
 tools/start-vcsim-binary.sh            # no Docker: downloads the vcsim binary once into ./bin
-# or: docker compose up -d
+# or: docker compose up -d --build    # container: also builds the lab + serves the API on :8000
 
-# 2. Build the lab
+# 2. Build the lab (binary path only — compose builds it inside the container)
 python scripts/build_lab.py
 
 # 3. Look at it
@@ -37,6 +37,7 @@ python scripts/query_lab.py --json     # machine-readable
 python scripts/query_lab.py --pci      # host PCI devices (GPU inventory)
 python scripts/query_storage.py        # host storage: HBAs, LUNs, mounts
 python scripts/verify_lab.py           # live lab vs vms.yaml
+python scripts/serve_api.py            # inventory API: http://127.0.0.1:8000/api, docs at /docs
 ```
 
 Tear down the lab VMs (leaves vcsim running):
@@ -51,13 +52,13 @@ Stop vcsim: `tools/stop-vcsim-binary.sh` (binary) or `docker compose down`.
 
 ```
 vms.yaml                 the lab: 22 VMs, folders, pools, vApps, networks (single source of truth)
-docker-compose.yml       vcsim container (vmware/vcsim:v0.56.2)
-requirements.txt         pyvmomi>=8.0, pyyaml>=6.0
-.env.example             VC_HOST/PORT/USER/PASSWORD, VC_INSECURE, VCSIM_VERSION
+docker-compose.yml       vcsim + lab + API container (builds the project image)
+requirements.txt         pyvmomi>=8.0, pyyaml>=6.0, fastapi, uvicorn, httpx
+.env.example             VC_HOST/PORT/USER/PASSWORD, VC_INSECURE, VCSIM_VERSION, API_HOST/PORT
 PROMPTS.md               log of the prompts that built this project
 storage.yaml             host storage model: arrays, LUNs, fabric HBAs, LUN -> datastore
-Dockerfile               vcsim + lab image (python:3.12-slim, vcsim binary)
-docker-entrypoint.sh     start vcsim, build the lab, stay in foreground
+Dockerfile               vcsim + lab + API image (python:3.12-slim, vcsim binary)
+docker-entrypoint.sh     start vcsim (internal), build the lab, serve the API
 render.yaml              Render Blueprint: web service from the Docker Hub image
 .dockerignore            keep bin/, model/, caches out of the image
 .github/workflows/docker-publish.yml   push to main -> build -> Docker Hub -> Render
@@ -72,6 +73,7 @@ vcsim_lab/
   storage.py             storage model (YAML -> dataclasses) + live reconciliation
   verify.py              live lab vs vms.yaml (core checks fail, best-effort warn)
   teardown.py            delete the lab VMs (and folders / pools / vApps on request)
+  api.py                 inventory API (FastAPI): /api/* + reverse proxy to vcsim
 
 scripts/
   build_lab.py           [--only NAME ...] [--recreate] [--report FILE] [--plan-only]
@@ -79,6 +81,7 @@ scripts/
   query_storage.py       [--json] [--only HOST ...] [--storage-yaml FILE]
   verify_lab.py          exit code 0 when all core checks pass
   teardown_lab.py        delete the lab VMs
+  serve_api.py           [--host HOST] [--port PORT] [--lab FILE] [--storage-yaml FILE]
 
 tools/
   start-vcsim-binary.sh  download + run the vcsim binary (no Docker)
@@ -92,7 +95,8 @@ tests/test_random_attrs.py 25 offline tests (seeded random attributes)
 tests/test_firmware_disks.py 33 offline tests (firmware mix, basic/dynamic disks, volumes)
 tests/test_config.py     4 offline tests (config loading)
 tests/test_vcenter.py    2 offline tests (network lookup)
-                         run all: pytest tests/ -q (130 tests, no vCenter needed)
+tests/test_api.py        21 offline tests (API routes, filters, errors, proxy forwarding)
+                         run all: pytest tests/ -q (151 tests, no vCenter needed)
 ```
 
 ## The lab
@@ -327,6 +331,87 @@ hardware — so the declared half can never be "built" into vcsim; it is a
 model to query against. Against a real vCenter the same code reads the
 real FC/iSCSI HBAs and, for VMFS datastores, verifies the backing LUN
 from the extent disk names (`backing_verified_live`).
+
+## Inventory API
+
+The lab also serves its inventory as JSON over HTTP. The API is the
+front door of the deployed service: it serves `/api/*` itself and
+reverse-proxies every other path to vcsim, so `/sdk` (the vSphere SOAP
+endpoint) and `/about` (vcsim's methods/types page) keep working
+unchanged on the same port.
+
+```
+                    ┌─────────────────────────────────────────┐
+  client ──────────►│  API server (uvicorn, $PORT)            │
+                    │  /api/*  served here (FastAPI)          │
+                    │  /docs   OpenAPI docs                   │
+                    │  /*      reverse-proxied ───┐           │
+                    └─────────────────────────────┼───────────┘
+                                                  ▼
+                                       vcsim (127.0.0.1:8989)
+                                       /sdk, /about, ...
+```
+
+Run it locally (with vcsim already running — binary path):
+
+```bash
+python scripts/serve_api.py                 # http://127.0.0.1:8000
+python scripts/serve_api.py --port 9000     # or API_PORT=9000
+```
+
+Or use the container (`docker compose up -d --build`), which starts
+vcsim, builds the lab, and serves the API on `http://127.0.0.1:8000`.
+
+| Endpoint | What it returns |
+|---|---|
+| `GET /api` | index of the endpoints |
+| `GET /api/inventory` | full inventory in one response (VMs, hosts, datastores, networks, pools, vApps) |
+| `GET /api/vms` | all VMs with full summaries (`?template=true/false` filters templates) |
+| `GET /api/vms/{name}` | one VM by name (404 when unknown) |
+| `GET /api/hosts` | hosts with PCI devices, GPU capability, and their VMs |
+| `GET /api/datastores` | datastores with capacity and mounts |
+| `GET /api/networks` | networks (standard, distributed, NSX opaque) |
+| `GET /api/vapps` | vApp containers with their member VMs |
+| `GET /api/storage` | host storage (HBAs, LUNs, mounts) reconciled with `storage.yaml` |
+| `GET /api/health` | API health + vcsim reachability (503 when vcsim is down) |
+| `GET /docs` | interactive OpenAPI docs (FastAPI) |
+
+Implementation notes (`vcsim_lab/api.py`, runner `scripts/serve_api.py`):
+
+- The endpoints reuse the existing read paths — `query.summarize_lab`,
+  `list_inventory`, `list_host_pci`, `storage.summarize_storage` — so
+  the API shows exactly what the query tools show, including the
+  declared-vs-live values (CBT, power state, tools status, disk layout)
+  when `vms.yaml` is present. No new inventory logic lives in the API.
+- pyVmomi is blocking, so the endpoints are sync `def` functions
+  (FastAPI runs them in a thread pool). Each request opens its own
+  vCenter connection — a login per request is cheap against vcsim and
+  avoids stale-session handling; when vcsim is unreachable the
+  endpoints answer 503 with a JSON message instead of crashing.
+- The proxy forwards method, path, query string, headers (including
+  `Authorization` and `Cookie`) and body byte-identical, and streams
+  the status, headers (including `Set-Cookie`) and body back — so
+  pyVmomi/govc clients talking SOAP to `/sdk` through the API port
+  work exactly as if they were talking to vcsim directly. If vcsim is
+  down the proxy answers 502. The proxy client is built with
+  `trust_env=False`, so an environment HTTP proxy (e.g. a corporate
+  `HTTP_PROXY`) is never used for the hop to vcsim.
+- The API inherits vcsim's quirks, reported honestly like the query
+  tool does: tools status is always `toolsNotInstalled`, dynamic GPU
+  backings read back degraded (`gpu=unknown`), and Secure Boot is
+  dropped (see "vcsim vs real vCenter").
+- **No authentication.** The API is read-only inventory on a public
+  service, and the user chose no API key (see PROMPTS.md entry 15).
+  The vcsim credentials (`VCSIM_USERNAME` / `VCSIM_PASSWORD`) still
+  guard `/sdk` itself — the proxy forwards auth through, it does not
+  bypass it.
+
+On Render the API listens on `$PORT` (Render injects it) and vcsim
+runs on internal `127.0.0.1:8989`; the entrypoint builds the lab
+before starting the API, so the port only starts listening once the
+lab exists (~8 s after the container starts). The free plan still
+spins the service down after 15 minutes idle, and every wake rebuilds
+the lab from scratch.
 
 ## How it works
 
@@ -583,14 +668,17 @@ push to main
 
 The image (`Dockerfile`, base `python:3.12-slim`) contains the vcsim
 binary plus the lab code. On start, `docker-entrypoint.sh` launches
-vcsim with the same inventory flags as `docker-compose.yml` on
-`0.0.0.0:${PORT:-8989}` (Render injects `$PORT`), waits for the SDK
-endpoint to answer, runs `scripts/build_lab.py` so the 22 VMs exist,
-then keeps vcsim in the foreground. Run it locally the same way:
+vcsim with the same inventory flags as `docker-compose.yml` on an
+internal port (`127.0.0.1:8989`), waits for the SDK endpoint to answer,
+runs `scripts/build_lab.py` so the 22 VMs exist, then serves the
+inventory API on `0.0.0.0:${PORT:-8000}` (Render injects `$PORT`) —
+the API is the front door, reverse-proxying `/sdk` and everything else
+to the internal vcsim (see "Inventory API"). Run it locally the same
+way:
 
 ```bash
 docker build -t vcsim-lab .
-docker run -p 8989:8989 vcsim-lab   # SDK: http://localhost:8989/sdk
+docker run -p 8000:8000 vcsim-lab   # API: http://localhost:8000/api, SDK: http://localhost:8000/sdk
 ```
 
 The container serves **plain HTTP**, not HTTPS: vcsim runs with
@@ -633,5 +721,8 @@ clients still reach the sim over HTTPS at
   interactively in the sim is lost on spin-down.
 - Free instances are capped at 750 instance-hours per workspace per
   month, so one always-on service nearly exhausts the budget.
-- There is no health-check endpoint: Render's default port check is
-  what marks the service live, and vcsim listens as soon as it starts.
+- There is a health-check endpoint now: `GET /api/health` answers 200
+  when the API can reach vcsim and 503 when it cannot, so it can be
+  used as Render's health check path. Note the port only starts
+  listening once the lab is built (~8 s after the container starts),
+  because the entrypoint builds the lab before serving the API.

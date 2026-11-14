@@ -32,17 +32,9 @@ def _load_declared(path: str) -> dict | None:
     the lab file cannot be loaded — querying stays live-only then.
     Each entry carries the seed-resolved attributes plus the declared
     disk layout (basic/dynamic types and volumes)."""
-    try:
-        lab = config.load_lab(path)
-    except (config.ConfigError, OSError) as exc:
-        print(f"note: could not load {path} ({exc}); showing live values only", file=sys.stderr)
-        return None
-    assigned = config.resolve_random_assignments(lab)
-    declared = {}
-    for vm in lab.vms:
-        entry = assigned[vm.name].to_dict()
-        entry["disk_layout"] = config.disk_layout_summary(vm)
-        declared[vm.name] = entry
+    declared = config.load_declared_assignments(path)
+    if declared is None:
+        print(f"note: could not load {path}; showing live values only", file=sys.stderr)
     return declared
 
 

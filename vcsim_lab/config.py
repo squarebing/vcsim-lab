@@ -754,6 +754,28 @@ def resolve_random_assignments(lab: LabConfig) -> dict[str, ResolvedAssignment]:
     return resolved
 
 
+def load_declared_assignments(path: str | Path = "vms.yaml") -> dict | None:
+    """The lab's per-VM declared values (name -> dict), or None when the
+    lab file cannot be loaded — callers then show live values only.
+
+    Each entry carries the seed-resolved attributes (cbt, power_state,
+    fast_boot, tools_status, boot_delay_ms) plus the declared disk
+    layout (basic/dynamic types and volumes). Shared by the query tool
+    and the inventory API so both show the same declared-vs-live view.
+    """
+    try:
+        lab = load_lab(path)
+    except (ConfigError, OSError):
+        return None
+    assigned = resolve_random_assignments(lab)
+    declared = {}
+    for vm in lab.vms:
+        entry = assigned[vm.name].to_dict()
+        entry["disk_layout"] = disk_layout_summary(vm)
+        declared[vm.name] = entry
+    return declared
+
+
 # ---------------------------------------------------------------------------
 # Disk layout (basic/dynamic disks, declared-only)
 # ---------------------------------------------------------------------------
