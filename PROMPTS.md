@@ -754,3 +754,23 @@ from the running (model-loaded) vcsim, 220 duplicates removed,
 32 warnings. Note govc object.save -f wipes files but not the
 old per-object subdirectories in the model dir (harmless —
 the loader ignores them).
+
+## 26. Workflow tags use the Docker Hub secret; pipeline verified live (2026-11-16)
+
+Bing updated .github/workflows/docker-publish.yml directly on
+GitHub (commit 870b0d7, "Update Docker tags to use GitHub
+secrets"): the image tags are now
+`${{ secrets.DOCKERHUB_USERNAME }}/vcsim-lab:latest` and
+`:${{ github.sha }}` instead of the hardcoded `squarebing/`
+prefix. The local copy was synced down from GitHub afterwards
+(the connector cannot push workflow files, so GitHub is the
+source of truth for this file).
+
+The run on that commit (44020953815) is green on every step,
+and the Render lab was verified current the same evening:
+31 VMs including clean-rhel9 (entry 23), and win2022-sql reads
+disk_enable_uuid True — the deployed image is no longer the
+pre-entry-20 build. The CI/CD pipeline (push to main -> build
+-> Docker Hub -> Render deploy hook) is live end to end; the
+earlier "first run failed at the Render step" caveat no longer
+applies.
